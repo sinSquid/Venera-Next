@@ -10,8 +10,11 @@ import 'package:venera_next/features/history/image_favorites_provider.dart';
 import 'package:venera_next/features/local_comics/local_comics.dart';
 import 'package:venera_next/foundation/app.dart';
 import 'package:venera_next/foundation/comic_type.dart';
+import 'package:venera_next/network/images.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
   late Directory root;
   setUp(() async {
     root = Directory.systemTemp.createTempSync('favorite-image-provider-');
@@ -97,6 +100,92 @@ void main() {
     expect(provider.lookups, 0);
     expect(provider.writes, 0);
   });
+
+  for (final shared in [false, true]) {
+    test(
+      'released favorite detaches from a stalled download: shared=$shared',
+      () async {
+        final started = Completer<void>();
+        var cancelled = false;
+        var sourceCalls = 0;
+        final network = StreamController<ImageDownloadProgress>(
+          onListen: started.complete,
+          onCancel: () => cancelled = true,
+        );
+        ImageDownloader.debugLoadComicImageUnwrapped =
+            (image, source, cid, eid) {
+              sourceCalls++;
+              return network.stream;
+            };
+        final provider = _NetworkCancellationProbe(favorite(1));
+        final other = shared
+            ? ImageDownloader.loadComicImage(
+                'known',
+                'local',
+                'book',
+                'chapter',
+              ).listen((_) {})
+            : null;
+        final errors = <Object>[];
+        final completer = provider.loadImage(provider, (
+          buffer, {
+          getTargetSize,
+        }) async {
+          throw StateError('Cancelled favorite must not be decoded');
+        });
+        final listener = ImageStreamListener(
+          (image, synchronous) => image.dispose(),
+          onError: (error, stack) => errors.add(error),
+        );
+        completer.addListener(listener);
+        var removed = false;
+        addTearDown(() async {
+          if (!removed) completer.removeListener(listener);
+          await other?.cancel();
+          ImageDownloader.cancelAllLoadingImages();
+          ImageDownloader.debugLoadComicImageUnwrapped = null;
+          await network.close();
+          await pumpEventQueue();
+        });
+
+        await started.future.timeout(const Duration(seconds: 1));
+        await pumpEventQueue();
+        expect(sourceCalls, 1);
+        completer.removeListener(listener);
+        removed = true;
+        await pumpEventQueue();
+
+        expect(cancelled, !shared);
+        expect(provider.lookups, 0);
+        expect(provider.writes, 0);
+        expect(errors, isEmpty);
+
+        await other?.cancel();
+        await pumpEventQueue();
+        expect(cancelled, isTrue);
+      },
+    );
+  }
+}
+
+class _NetworkCancellationProbe extends ImageFavoritesProvider {
+  _NetworkCancellationProbe(ImageFavorite favorite)
+    : super(favorite.copyWith(imageKey: 'known'));
+  int lookups = 0;
+  int writes = 0;
+
+  @override
+  Future<Uint8List?> getImageFromLocal() async => null;
+  @override
+  Future<Uint8List?> readFromCache() async => null;
+  @override
+  Future<String> getImageKey() async {
+    lookups++;
+    return 'refreshed';
+  }
+
+  @override
+  Future<void> writeToCache(Uint8List image) async => writes++;
 }
 
 class _CancellationProbe extends ImageFavoritesProvider {

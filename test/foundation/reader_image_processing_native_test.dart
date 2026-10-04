@@ -77,7 +77,7 @@ void main() {
         page: 3,
         sourceKey: 'source',
         checkStop: checkStop ?? () {},
-        cancelSignal: cancelSignal ?? Completer<void>().future,
+        cancelSignal: cancelSignal,
       );
       for (final expression in [
         'new Uint8Array([3, 4]).buffer',

@@ -57,6 +57,12 @@ abstract class ImageDownloader {
   debugLoadComicImageUnwrapped;
 
   @visibleForTesting
+  static Dio Function(BaseOptions options)? debugCreateDio;
+
+  static Dio _createDio(BaseOptions options) =>
+      debugCreateDio?.call(options) ?? AppDio(options);
+
+  @visibleForTesting
   static bool debugShouldRetryImageLoad({
     required int retriesRemaining,
     required bool hasOnLoadFailed,
@@ -205,7 +211,7 @@ abstract class ImageDownloader {
         }
       }
 
-      dio = AppDio(
+      dio = _createDio(
         BaseOptions(
           headers: Map<String, dynamic>.from(configs['headers']),
           method: configs['method'] ?? 'GET',
@@ -226,10 +232,11 @@ abstract class ImageDownloader {
       var stream = req.data?.stream ?? (throw "Error: Empty response body.");
       int? expectedBytes = req.data!.contentLength;
       if (expectedBytes == -1) expectedBytes = null;
-      var buffer = <int>[];
+      // RHttpAdapter emits owned chunks; combine them only when complete.
+      final buffer = BytesBuilder(copy: false);
       await for (var data in stream) {
         scope.check();
-        buffer.addAll(data);
+        buffer.add(data);
         if (expectedBytes != null) {
           yield ImageDownloadProgress(
             currentBytes: buffer.length,
@@ -238,21 +245,25 @@ abstract class ImageDownloader {
         }
       }
 
+      var bytes = buffer.takeBytes();
       final responseCallback = onResponse;
       if (responseCallback != null) {
-        buffer = await scope.run(() {
+        final processed = await scope.run(() {
           onResponse = null;
-          return _applyImageResponseCallback(responseCallback, buffer);
+          return _applyImageResponseCallback(responseCallback, bytes);
         });
+        bytes = processed is Uint8List
+            ? processed
+            : Uint8List.fromList(processed);
       }
 
       scope.check();
-      await CacheManager().writeCache(cacheKey, buffer);
+      await CacheManager().writeCache(cacheKey, bytes);
       scope.check();
       yield ImageDownloadProgress(
-        currentBytes: buffer.length,
-        totalBytes: buffer.length,
-        imageBytes: Uint8List.fromList(buffer),
+        currentBytes: bytes.length,
+        totalBytes: bytes.length,
+        imageBytes: bytes,
       );
     } finally {
       onResponse?.free();
@@ -365,7 +376,7 @@ abstract class ImageDownloader {
             ? onLoadFailedConfig
             : null;
 
-        var dio = AppDio(
+        var dio = _createDio(
           BaseOptions(
             headers: configs['headers'],
             method: configs['method'] ?? 'GET',
@@ -384,29 +395,26 @@ abstract class ImageDownloader {
         if (expectedBytes == -1) {
           expectedBytes = null;
         }
-        var buffer = <int>[];
+        // RHttpAdapter emits owned chunks; combine them only when complete.
+        final buffer = BytesBuilder(copy: false);
         await for (var data in stream) {
           scope?.check();
-          buffer.addAll(data);
+          buffer.add(data);
           yield ImageDownloadProgress(
             currentBytes: buffer.length,
             totalBytes: expectedBytes,
           );
         }
 
+        var data = buffer.takeBytes();
         if (configs['onResponse'] is JSInvokable) {
-          buffer = await _applyImageResponseCallback(
+          final processed = await _applyImageResponseCallback(
             configs['onResponse'] as JSInvokable,
-            buffer,
+            data,
           );
-        }
-
-        Uint8List data;
-        if (buffer is Uint8List) {
-          data = buffer;
-        } else {
-          data = Uint8List.fromList(buffer);
-          buffer.clear();
+          data = processed is Uint8List
+              ? processed
+              : Uint8List.fromList(processed);
         }
 
         if (configs['modifyImage'] != null) {

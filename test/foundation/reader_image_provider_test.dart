@@ -6,6 +6,33 @@ import 'package:flutter_qjs/flutter_qjs.dart';
 import 'package:venera_next/foundation/image_provider/reader_image_processing.dart';
 
 void main() {
+  test('reader image processing without a signal awaits its result', () async {
+    final bytes = Uint8List.fromList([1, 2, 3]);
+    var canceled = false;
+    final result = await waitForReaderImageProcessingResult(
+      Future.value(bytes),
+      () => canceled = true,
+      () {},
+    );
+    expect(result, same(bytes));
+    expect(canceled, isFalse);
+  });
+
+  test(
+    'reader image processing without a signal preserves future errors',
+    () async {
+      final error = StateError('processing failed');
+      var canceled = false;
+      final result = waitForReaderImageProcessingResult(
+        Future.error(error),
+        () => canceled = true,
+        () {},
+      );
+      await expectLater(result, throwsA(same(error)));
+      expect(canceled, isFalse);
+    },
+  );
+
   test(
     'cancelled processing frees callbacks in late result exactly once',
     () async {

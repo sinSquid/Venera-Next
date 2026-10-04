@@ -8,7 +8,7 @@ Future<dynamic> waitForReaderImageProcessingResult(
   Future<dynamic> image,
   void Function() onCancel,
   void Function() checkStop, {
-  required Future<void> cancelSignal,
+  Future<void>? cancelSignal,
 }) async {
   var abandoned = false;
   var completed = false;
@@ -26,10 +26,12 @@ Future<dynamic> waitForReaderImageProcessingResult(
   }
 
   try {
-    final result = await Future.any<dynamic>([
-      tracked,
-      cancelSignal.then((_) => _imageProcessingCanceled),
-    ]);
+    final result = cancelSignal == null
+        ? await tracked
+        : await Future.any<dynamic>([
+            tracked,
+            cancelSignal.then((_) => _imageProcessingCanceled),
+          ]);
     if (identical(result, _imageProcessingCanceled)) {
       abandon();
       onCancel();
@@ -52,7 +54,7 @@ Future<Uint8List> processReaderImageBytes(
   required int page,
   required String? sourceKey,
   required void Function() checkStop,
-  required Future<void> cancelSignal,
+  Future<void>? cancelSignal,
 }) async {
   checkStop();
   final callbacks = JsCallbackScope();

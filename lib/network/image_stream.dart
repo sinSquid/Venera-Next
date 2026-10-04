@@ -7,15 +7,17 @@ import 'images.dart';
 /// Releasing this subscription leaves other shared download listeners intact.
 Future<Uint8List?> readImageStream(
   Stream<ImageDownloadProgress> stream, {
-  required Future<void> cancelSignal,
+  Future<void>? cancelSignal,
   required void Function() checkStop,
   void Function(ImageDownloadProgress)? onProgress,
 }) async {
   checkStop();
   final iterator = StreamIterator(stream);
-  final cancelled = cancelSignal.then((_) => false);
+  final cancelled = cancelSignal?.then((_) => false);
   try {
-    while (await Future.any([iterator.moveNext(), cancelled])) {
+    while (await (cancelled == null
+        ? iterator.moveNext()
+        : Future.any([iterator.moveNext(), cancelled]))) {
       checkStop();
       final event = iterator.current;
       onProgress?.call(event);

@@ -8,6 +8,7 @@ import 'package:venera_next/foundation/comic_type.dart';
 import 'package:venera_next/features/local_comics/local_comics.dart';
 import 'package:venera_next/foundation/image_provider/base_image_provider.dart';
 import 'package:venera_next/network/images.dart';
+import 'package:venera_next/network/image_stream.dart';
 import 'package:venera_next/foundation/file_system.dart';
 import 'package:venera_next/features/history/image_favorites_models.dart';
 import 'image_favorites_provider.dart' as image_provider;
@@ -131,25 +132,19 @@ class ImageFavoritesProvider
     StreamController<ImageChunkEvent>? chunkEvents,
     void Function()? checkStop,
   ) async {
-    await for (var progress in ImageDownloader.loadComicImage(
-      imageKey,
-      sourceKey,
-      cid,
-      eid,
-    )) {
-      checkStop?.call();
-      if (chunkEvents != null) {
-        chunkEvents.add(
-          ImageChunkEvent(
-            cumulativeBytesLoaded: progress.currentBytes,
-            expectedTotalBytes: progress.totalBytes,
-          ),
-        );
-      }
-      if (progress.imageBytes != null) {
-        return progress.imageBytes!;
-      }
-    }
+    final check = checkStop ?? () {};
+    final bytes = await readImageStream(
+      ImageDownloader.loadComicImage(imageKey, sourceKey, cid, eid),
+      cancelSignal: BaseImageProvider.cancelSignalOf(check),
+      checkStop: check,
+      onProgress: (progress) => chunkEvents?.add(
+        ImageChunkEvent(
+          cumulativeBytesLoaded: progress.currentBytes,
+          expectedTotalBytes: progress.totalBytes,
+        ),
+      ),
+    );
+    if (bytes != null) return bytes;
     throw "Error: Empty response body.";
   }
 

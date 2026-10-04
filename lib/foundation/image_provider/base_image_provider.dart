@@ -15,10 +15,9 @@ abstract class BaseImageProvider<T extends BaseImageProvider<T>>
 
   static final Expando<Future<void>> _cancelSignals = Expando<Future<void>>();
 
-  static final Future<void> _neverCancelSignal = Completer<void>().future;
-
-  static Future<void> cancelSignalOf(void Function() checkStop) {
-    return _cancelSignals[checkStop] ?? _neverCancelSignal;
+  static Future<void>? cancelSignalOf(void Function() checkStop) {
+    // Direct loads (for example exporting an image) have no widget lifetime.
+    return _cancelSignals[checkStop];
   }
 
   @visibleForTesting

@@ -29,6 +29,10 @@ class _TestImage extends BaseImageProvider<_TestImage> {
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  test('direct image loads have no synthetic cancellation future', () {
+    expect(BaseImageProvider.cancelSignalOf(() {}), isNull);
+  });
+
   Future<Object?> resolveImage(_TestImage provider) async {
     final result = Completer<Object?>();
     final stream = provider.resolve(ImageConfiguration.empty);

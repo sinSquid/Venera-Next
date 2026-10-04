@@ -8,6 +8,82 @@ import 'package:venera_next/network/request_scope.dart';
 
 void main() {
   test(
+    'without a cancel signal, all chunks are consumed until completion',
+    () async {
+      var cancelled = false;
+      final source = StreamController<ImageDownloadProgress>(
+        onCancel: () => cancelled = true,
+      );
+      final progress = <int>[];
+      final result = readImageStream(
+        source.stream,
+        checkStop: () {},
+        onProgress: (event) => progress.add(event.currentBytes),
+      );
+      for (var i = 1; i <= 3; i++) {
+        source.add(ImageDownloadProgress(currentBytes: i, totalBytes: null));
+      }
+      await source.close();
+
+      expect(await result, isNull);
+      expect(progress, [1, 2, 3]);
+      expect(cancelled, isTrue);
+    },
+  );
+
+  test(
+    'without a cancel signal, final bytes release the stream early',
+    () async {
+      var cancelled = false;
+      final source = StreamController<ImageDownloadProgress>(
+        onCancel: () => cancelled = true,
+      );
+      final progress = <int>[];
+      final result = readImageStream(
+        source.stream,
+        checkStop: () {},
+        onProgress: (event) => progress.add(event.currentBytes),
+      );
+      final bytes = Uint8List.fromList([1, 2, 3]);
+      source.add(const ImageDownloadProgress(currentBytes: 1, totalBytes: 3));
+      source.add(const ImageDownloadProgress(currentBytes: 2, totalBytes: 3));
+      source.add(
+        ImageDownloadProgress(
+          currentBytes: 3,
+          totalBytes: 3,
+          imageBytes: bytes,
+        ),
+      );
+      source.add(const ImageDownloadProgress(currentBytes: 4, totalBytes: 4));
+
+      expect(await result, same(bytes));
+      expect(progress, [1, 2, 3]);
+      expect(cancelled, isTrue);
+      expect(source.isClosed, isFalse);
+      await source.close();
+    },
+  );
+
+  test(
+    'without a cancel signal, stream errors propagate and unsubscribe',
+    () async {
+      var cancelled = false;
+      final source = StreamController<ImageDownloadProgress>(
+        onCancel: () => cancelled = true,
+      );
+      final error = StateError('download failed');
+      final result = readImageStream(source.stream, checkStop: () {});
+      final expectation = expectLater(result, throwsA(same(error)));
+      source.add(const ImageDownloadProgress(currentBytes: 1, totalBytes: 3));
+      source.addError(error);
+
+      await expectation;
+      expect(cancelled, isTrue);
+      await source.close();
+    },
+  );
+
+  test(
     'cancels a stalled subscription without waiting for another event',
     () async {
       final scope = RequestScope();
