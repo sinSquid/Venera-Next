@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:venera_next/foundation/cache_manager.dart';
 import 'package:venera_next/foundation/cache_scan.dart';
@@ -133,5 +134,55 @@ void main() {
       2,
       3,
     ]);
+  });
+
+  test('expired lookups release size without evicting live entries', () async {
+    final f = fixture();
+    final bytes = List<int>.filled(600 * 1024, 1);
+    await f.manager.writeCache('expired', bytes, -1);
+    await f.manager.writeCache('live', bytes);
+
+    expect(await f.manager.findCache('expired'), isNull);
+    expect(f.manager.currentSize, bytes.length);
+    f.manager.setLimitSize(1);
+    await f.manager.checkCacheIfRequired();
+
+    expect(await f.manager.findCache('live'), isNotNull);
+    expect(f.manager.currentSize, bytes.length);
+  });
+
+  test('cleanup resets size after tracked files disappear', () async {
+    final f = fixture();
+    await f.manager.writeCache('missing', [1, 2, 3]);
+    final file = (await f.manager.findCache('missing'))!;
+    await file.delete();
+
+    f.manager.setLimitSize(0);
+    await f.manager.checkCache();
+
+    expect(f.manager.currentSize, 0);
+    expect(await f.manager.findCache('missing'), isNull);
+    f.manager.setLimitSize(1);
+    await f.manager.writeCache('new', [4]);
+    expect(f.manager.currentSize, 1);
+    expect(await (await f.manager.findCache('new'))!.readAsBytes(), [4]);
+  });
+
+  test('scan matches ownership by directory as well as filename', () async {
+    final f = fixture();
+    await f.manager.writeCache('key', [1, 2, 3]);
+    final managed = (await f.manager.findCache('key'))!;
+    final name = managed.uri.pathSegments.last;
+    final orphan = File('${f.root.path}/cache/orphan/$name');
+    await orphan.create(recursive: true);
+    await orphan.writeAsBytes([4, 5]);
+
+    final result = await scanCacheDirectory(
+      '${f.root.path}/cache.db',
+      '${f.root.path}/cache',
+    );
+
+    expect(result.totalSize, 3);
+    expect(result.unmanagedFiles, [orphan.path]);
   });
 }

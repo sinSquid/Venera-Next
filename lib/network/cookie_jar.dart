@@ -42,6 +42,19 @@ class CookieJarSql {
       if (currentCookie != null) {
         cookie.domain = currentCookie.domain;
       }
+      final domain = cookie.domain ?? uri.host;
+      final path = cookie.path ?? '/';
+      final maxAge = cookie.maxAge;
+      if (maxAge != null && maxAge <= 0) {
+        _db.execute(
+          'DELETE FROM cookies WHERE name = ? AND domain = ? AND path = ?',
+          [cookie.name, domain, path],
+        );
+        continue;
+      }
+      final expires = maxAge == null
+          ? cookie.expires?.millisecondsSinceEpoch
+          : DateTime.now().millisecondsSinceEpoch + maxAge * 1000;
       _db.execute(
         '''
         INSERT OR REPLACE INTO cookies (name, value, domain, path, expires, secure, httpOnly)
@@ -50,9 +63,9 @@ class CookieJarSql {
         [
           cookie.name,
           cookie.value,
-          cookie.domain ?? uri.host,
-          cookie.path ?? "/",
-          cookie.expires?.millisecondsSinceEpoch,
+          domain,
+          path,
+          expires,
           cookie.secure ? 1 : 0,
           cookie.httpOnly ? 1 : 0,
         ],
@@ -120,7 +133,9 @@ class CookieJarSql {
     return cookies
         .where(
           (element) =>
-              !expires.contains(element) && _checkPathMatch(uri, element.path),
+              !expires.contains(element) &&
+              (!element.secure || uri.scheme == 'https') &&
+              _checkPathMatch(uri, element.path),
         )
         .toList();
   }
@@ -142,7 +157,7 @@ class CookieJarSql {
       return uri.path.startsWith(cookiePath);
     }
 
-    return uri.path.startsWith(cookiePath);
+    return uri.path.startsWith('$cookiePath/');
   }
 
   void saveFromResponseCookieHeader(Uri uri, List<String> cookieHeader) {

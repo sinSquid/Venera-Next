@@ -1,9 +1,10 @@
-import 'dart:async' show Completer, Future, FutureOr;
+import 'dart:async' show Completer, Future, FutureOr, StreamController;
 import 'dart:collection';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:venera_next/foundation/file_system.dart';
 import 'package:venera_next/network/images.dart';
+import 'package:venera_next/network/image_stream.dart';
 import 'base_image_provider.dart';
 import 'cached_image.dart' as image_provider;
 
@@ -67,30 +68,30 @@ class CachedImageProvider
     );
   }
 
-  Future<Uint8List> _loadImage(chunkEvents, checkStop) async {
+  Future<Uint8List> _loadImage(
+    StreamController<ImageChunkEvent> chunkEvents,
+    void Function() checkStop,
+  ) async {
     try {
       if (url.startsWith("file://")) {
         var file = File(url.substring(7));
         return await file.readAsBytes();
       }
-      await for (var progress in ImageDownloader.loadThumbnail(
-        url,
-        sourceKey,
-        cid,
-      )) {
-        checkStop();
-        chunkEvents.add(
+      final bytes = await readImageStream(
+        ImageDownloader.loadThumbnail(url, sourceKey, cid),
+        cancelSignal: BaseImageProvider.cancelSignalOf(checkStop),
+        checkStop: checkStop,
+        onProgress: (progress) => chunkEvents.add(
           ImageChunkEvent(
             cumulativeBytesLoaded: progress.currentBytes,
             expectedTotalBytes: progress.totalBytes,
           ),
-        );
-        if (progress.imageBytes != null) {
-          return progress.imageBytes!;
-        }
-      }
+        ),
+      );
+      if (bytes != null) return bytes;
       throw "Error: Empty response body.";
     } catch (e) {
+      checkStop();
       final fallbackImage = await fallback?.call();
       if (fallbackImage != null) {
         if (fallbackImage.isNotEmpty) {

@@ -1,4 +1,5 @@
 import 'dart:typed_data';
+
 import 'package:venera_next/network/app_dio.dart';
 
 class NetworkCache {
@@ -14,6 +15,8 @@ class NetworkCache {
 
   final int size;
 
+  final ResponseType responseType;
+
   const NetworkCache({
     required this.uri,
     required this.requestHeaders,
@@ -21,11 +24,28 @@ class NetworkCache {
     required this.data,
     required this.time,
     required this.size,
+    this.responseType = ResponseType.json,
   });
 }
 
 class NetworkCacheManager extends Interceptor {
-  NetworkCacheManager._();
+  NetworkCacheManager._() : this.withRevalidator(_revalidateWithAppDio);
+
+  /// An independent cache with a caller-provided HEAD request implementation.
+  NetworkCacheManager.withRevalidator(this._revalidate);
+
+  final Future<Response<dynamic>> Function(RequestOptions) _revalidate;
+
+  static Future<Response<dynamic>> _revalidateWithAppDio(
+    RequestOptions options,
+  ) async {
+    final dio = AppDio();
+    try {
+      return await dio.fetch(options);
+    } finally {
+      dio.close();
+    }
+  }
 
   static final NetworkCacheManager instance = NetworkCacheManager._();
 
@@ -40,6 +60,44 @@ class NetworkCacheManager extends Interceptor {
   }
 
   static const _maxCacheSize = 10 * 1024 * 1024;
+  static const _requestHeadersKey = 'venera-cache-request-headers';
+
+  static Map<String, dynamic> _copyRequestHeaders(
+    Map<String, dynamic> headers,
+  ) => headers.map(
+    (key, value) => MapEntry(key, value is List ? List.of(value) : value),
+  );
+
+  static Map<String, List<String>> _copyResponseHeaders(
+    Map<String, List<String>> headers,
+  ) => headers.map((key, value) => MapEntry(key, List<String>.of(value)));
+
+  static Object? _copyData(Object? data) {
+    if (data is Uint8List) return Uint8List.fromList(data);
+    if (data is List<int>) return List<int>.of(data);
+    if (data is List) return data.map(_copyData).toList();
+    if (data is Map<String, dynamic>) {
+      return data.map((key, value) => MapEntry(key, _copyData(value)));
+    }
+    if (data is Map) {
+      return data.map((key, value) => MapEntry(key, _copyData(value)));
+    }
+    return data;
+  }
+
+  static bool _forbidsCache(Map<String, dynamic> headers) {
+    return headers.entries.any((entry) {
+      if (entry.key.toLowerCase() != 'cache-control') return false;
+      final value = entry.value;
+      final directives = (value is List ? value.join(',') : value.toString())
+          .toLowerCase()
+          .split(',')
+          .map((directive) => directive.trim().split('=').first.trim());
+      return directives.any(
+        (value) => value == 'no-store' || value == 'no-cache',
+      );
+    });
+  }
 
   void setCache(NetworkCache cache) {
     if (_cache.containsKey(cache.uri)) {
@@ -86,29 +144,30 @@ class NetworkCacheManager extends Interceptor {
     if (options.method != "GET") {
       return handler.next(options);
     }
+    final cacheTime = options.headers.remove('cache-time');
+    if (options.data != null || _forbidsCache(options.headers)) {
+      return handler.next(options);
+    }
+    // Later interceptors and adapters may add transport headers, such as the
+    // default User-Agent. Compare the same request stage on subsequent calls.
+    options.extra[_requestHeadersKey] = _copyRequestHeaders(options.headers);
     var cache = getCache(options.uri);
     if (cache == null ||
+        cache.responseType != options.responseType ||
         !compareHeaders(options.headers, cache.requestHeaders)) {
-      if (options.headers['cache-time'] != null) {
-        options.headers.remove('cache-time');
-      }
       return handler.next(options);
-    } else {
-      if (options.headers['cache-time'] == 'no') {
-        options.headers.remove('cache-time');
-        removeCache(options.uri);
-        return handler.next(options);
-      }
+    } else if (cacheTime == 'no') {
+      removeCache(options.uri);
+      return handler.next(options);
     }
     var time = DateTime.now();
     var diff = time.difference(cache.time);
-    if (options.headers['cache-time'] == 'long' &&
-        diff < const Duration(hours: 6)) {
+    if (cacheTime == 'long' && diff < const Duration(hours: 6)) {
       return handler.resolve(
         Response(
           requestOptions: options,
-          data: cache.data,
-          headers: Headers.fromMap(cache.responseHeaders)
+          data: _copyData(cache.data),
+          headers: Headers.fromMap(_copyResponseHeaders(cache.responseHeaders))
             ..set('venera-cache', 'true'),
           statusCode: 200,
         ),
@@ -117,53 +176,72 @@ class NetworkCacheManager extends Interceptor {
       return handler.resolve(
         Response(
           requestOptions: options,
-          data: cache.data,
-          headers: Headers.fromMap(cache.responseHeaders)
+          data: _copyData(cache.data),
+          headers: Headers.fromMap(_copyResponseHeaders(cache.responseHeaders))
             ..set('venera-cache', 'true'),
           statusCode: 200,
         ),
       );
     } else if (diff < const Duration(hours: 2)) {
       var o = options.copyWith(method: "HEAD");
-      var dio = AppDio();
-      var response = await dio.fetch(o);
-      if (response.statusCode == 200 &&
-          compareHeaders(cache.responseHeaders, response.headers.map)) {
-        return handler.resolve(
-          Response(
-            requestOptions: options,
-            data: cache.data,
-            headers: Headers.fromMap(cache.responseHeaders)
-              ..set('venera-cache', 'true'),
-            statusCode: 200,
-          ),
-        );
+      try {
+        final response = await _revalidate(o);
+        if (response.statusCode == 200 &&
+            compareHeaders(
+              cache.responseHeaders,
+              response.headers.map,
+              responseHeaders: true,
+            )) {
+          return handler.resolve(
+            Response(
+              requestOptions: options,
+              data: _copyData(cache.data),
+              headers: Headers.fromMap(
+                _copyResponseHeaders(cache.responseHeaders),
+              )..set('venera-cache', 'true'),
+              statusCode: 200,
+            ),
+          );
+        }
+      } catch (error) {
+        final canceled = options.cancelToken?.cancelError;
+        if (canceled != null) {
+          return handler.reject(canceled.copyWith(requestOptions: options));
+        }
+        if (error is DioException && error.type == DioExceptionType.cancel) {
+          return handler.reject(error.copyWith(requestOptions: options));
+        }
+        // HEAD is only an optimization; servers may reject it even when GET
+        // succeeds. Always finish the interceptor by falling back to GET.
       }
     }
     removeCache(options.uri);
     handler.next(options);
   }
 
-  static bool compareHeaders(Map<String, dynamic> a, Map<String, dynamic> b) {
-    a = Map.from(a);
-    b = Map.from(b);
-    const shouldIgnore = [
+  static bool compareHeaders(
+    Map<String, dynamic> a,
+    Map<String, dynamic> b, {
+    bool responseHeaders = false,
+  }) {
+    a = a.map((key, value) => MapEntry(key.toLowerCase(), value));
+    b = b.map((key, value) => MapEntry(key.toLowerCase(), value));
+    final shouldIgnore = [
       'cache-time',
       'prevent-parallel',
-      'date',
-      'x-varnish',
-      'cf-ray',
-      'connection',
-      'vary',
-      'content-encoding',
-      'report-to',
-      'server-timing',
-      'token',
-      'set-cookie',
-      'cf-cache-status',
-      'cf-request-id',
-      'cf-ray',
-      'authorization',
+      if (responseHeaders) ...[
+        'date',
+        'x-varnish',
+        'cf-ray',
+        'connection',
+        'vary',
+        'content-encoding',
+        'report-to',
+        'server-timing',
+        'set-cookie',
+        'cf-cache-status',
+        'cf-request-id',
+      ],
     ];
     for (var key in shouldIgnore) {
       a.remove(key);
@@ -194,10 +272,16 @@ class NetworkCacheManager extends Interceptor {
     Response<dynamic> response,
     ResponseInterceptorHandler handler,
   ) {
-    if (response.requestOptions.method != "GET") {
+    if (response.requestOptions.method != "GET" ||
+        response.requestOptions.data != null ||
+        _forbidsCache(response.requestOptions.headers)) {
       return handler.next(response);
     }
-    if (response.statusCode != null && response.statusCode! >= 400) {
+    if (_forbidsCache(response.headers.map)) {
+      removeCache(response.requestOptions.uri);
+      return handler.next(response);
+    }
+    if (response.statusCode != 200) {
       return handler.next(response);
     }
     if (isMalformedExpectedJsonResponse(response)) {
@@ -208,11 +292,16 @@ class NetworkCacheManager extends Interceptor {
     if (size != null && size < 1024 * 1024 && size > 0) {
       var cache = NetworkCache(
         uri: response.requestOptions.uri,
-        requestHeaders: response.requestOptions.headers,
-        responseHeaders: Map.from(response.headers.map),
-        data: response.data,
+        requestHeaders: _copyRequestHeaders(
+          response.requestOptions.extra.remove(_requestHeadersKey)
+                  as Map<String, dynamic>? ??
+              response.requestOptions.headers,
+        ),
+        responseHeaders: _copyResponseHeaders(response.headers.map),
+        data: _copyData(response.data),
         time: DateTime.now(),
         size: size,
+        responseType: response.requestOptions.responseType,
       );
       setCache(cache);
     }

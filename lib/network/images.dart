@@ -140,85 +140,124 @@ abstract class ImageDownloader {
     String url,
     String? sourceKey, [
     String? cid,
-  ]) async* {
+  ]) {
+    return SharedRequestStream<ImageDownloadProgress>(
+      (scope) => _loadThumbnail(url, sourceKey, cid, scope),
+      (_) {},
+    ).stream;
+  }
+
+  static Stream<ImageDownloadProgress> _loadThumbnail(
+    String url,
+    String? sourceKey,
+    String? cid,
+    RequestScope scope,
+  ) async* {
+    scope.check();
     final cacheKey = "$url@$sourceKey${cid != null ? '@$cid' : ''}";
     final cache = await CacheManager().findCache(cacheKey);
+    scope.check();
 
     if (cache != null) {
       var data = await cache.readAsBytes();
+      scope.check();
       yield ImageDownloadProgress(
         currentBytes: data.length,
         totalBytes: data.length,
         imageBytes: data,
       );
+      return;
     }
 
-    var configs = <String, dynamic>{};
-    if (sourceKey != null) {
-      configs =
-          await _thumbnailLoadingConfigResolver?.call(sourceKey, url) ?? {};
-    }
-    configs['headers'] ??= {};
-    if (configs['headers']['user-agent'] == null &&
-        configs['headers']['User-Agent'] == null) {
-      configs['headers']['user-agent'] = webUA;
-    }
-
-    if (((configs['url'] as String?) ?? url).startsWith('cover.') &&
-        sourceKey != null &&
-        cid != null) {
-      final coverUrl = await _thumbnailCoverResolver?.call(sourceKey, cid);
-      if (coverUrl != null) {
-        yield* loadThumbnail(coverUrl, sourceKey);
-        return;
+    Dio? dio;
+    JSInvokable? onResponse;
+    try {
+      var configs = <String, dynamic>{};
+      if (sourceKey != null) {
+        configs = await scope.run(() async {
+          final result =
+              await _thumbnailLoadingConfigResolver?.call(sourceKey, url) ?? {};
+          if (scope.isCancelled) {
+            final callback = result['onResponse'];
+            if (callback is JSInvokable) callback.free();
+            scope.check();
+          }
+          final callback = result['onResponse'];
+          onResponse = callback is JSInvokable ? callback : null;
+          return result;
+        });
       }
-    }
+      configs['headers'] ??= {};
+      if (configs['headers']['user-agent'] == null &&
+          configs['headers']['User-Agent'] == null) {
+        configs['headers']['user-agent'] = webUA;
+      }
 
-    var dio = AppDio(
-      BaseOptions(
-        headers: Map<String, dynamic>.from(configs['headers']),
-        method: configs['method'] ?? 'GET',
-        responseType: ResponseType.stream,
-      ),
-    );
-
-    String requestUrl = configs['url'] ?? url;
-    if (requestUrl.startsWith('//')) {
-      requestUrl = 'https:$requestUrl';
-    }
-    var req = await dio.request<ResponseBody>(
-      requestUrl,
-      data: configs['data'],
-    );
-    var stream = req.data?.stream ?? (throw "Error: Empty response body.");
-    int? expectedBytes = req.data!.contentLength;
-    if (expectedBytes == -1) {
-      expectedBytes = null;
-    }
-    var buffer = <int>[];
-    await for (var data in stream) {
-      buffer.addAll(data);
-      if (expectedBytes != null) {
-        yield ImageDownloadProgress(
-          currentBytes: buffer.length,
-          totalBytes: expectedBytes,
+      if (((configs['url'] as String?) ?? url).startsWith('cover.') &&
+          sourceKey != null &&
+          cid != null) {
+        final coverUrl = await scope.run(
+          () async => await _thumbnailCoverResolver?.call(sourceKey, cid),
         );
+        if (coverUrl != null) {
+          yield* _loadThumbnail(coverUrl, sourceKey, null, scope);
+          return;
+        }
       }
-    }
 
-    if (configs['onResponse'] is JSInvokable) {
-      buffer = await _applyImageResponseCallback(
-        configs['onResponse'] as JSInvokable,
-        buffer,
+      dio = AppDio(
+        BaseOptions(
+          headers: Map<String, dynamic>.from(configs['headers']),
+          method: configs['method'] ?? 'GET',
+          responseType: ResponseType.stream,
+        ),
       );
-    }
 
-    await CacheManager().writeCache(cacheKey, buffer);
-    yield ImageDownloadProgress(
-      currentBytes: buffer.length,
-      totalBytes: buffer.length,
-      imageBytes: Uint8List.fromList(buffer),
-    );
+      String requestUrl = configs['url'] ?? url;
+      if (requestUrl.startsWith('//')) {
+        requestUrl = 'https:$requestUrl';
+      }
+      var req = await dio.request<ResponseBody>(
+        requestUrl,
+        data: configs['data'],
+        cancelToken: scope.cancelToken,
+      );
+      scope.check();
+      var stream = req.data?.stream ?? (throw "Error: Empty response body.");
+      int? expectedBytes = req.data!.contentLength;
+      if (expectedBytes == -1) expectedBytes = null;
+      var buffer = <int>[];
+      await for (var data in stream) {
+        scope.check();
+        buffer.addAll(data);
+        if (expectedBytes != null) {
+          yield ImageDownloadProgress(
+            currentBytes: buffer.length,
+            totalBytes: expectedBytes,
+          );
+        }
+      }
+
+      final responseCallback = onResponse;
+      if (responseCallback != null) {
+        buffer = await scope.run(() {
+          onResponse = null;
+          return _applyImageResponseCallback(responseCallback, buffer);
+        });
+      }
+
+      scope.check();
+      await CacheManager().writeCache(cacheKey, buffer);
+      scope.check();
+      yield ImageDownloadProgress(
+        currentBytes: buffer.length,
+        totalBytes: buffer.length,
+        imageBytes: Uint8List.fromList(buffer),
+      );
+    } finally {
+      onResponse?.free();
+      dio?.close();
+    }
   }
 
   static final _loadingImages =

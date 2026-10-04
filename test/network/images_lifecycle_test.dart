@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter_qjs/flutter_qjs.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:venera_next/foundation/cache_manager.dart';
 import 'package:venera_next/network/images.dart';
@@ -46,6 +47,29 @@ void main() {
     expect(sourceCalls, 0);
   });
 
+  test(
+    'cached thumbnail completes without source resolution or network',
+    () async {
+      await cache.writeCache('cover@source@comic', [1, 2, 3]);
+      var sourceCalls = 0;
+      ImageDownloader.configureSourceImageLoading(
+        thumbnailLoadingConfig: (source, url) {
+          sourceCalls++;
+          throw StateError('Cache hit must not resolve a source');
+        },
+      );
+
+      final events = await ImageDownloader.loadThumbnail(
+        'cover',
+        'source',
+        'comic',
+      ).toList();
+
+      expect(events.single.imageBytes, [1, 2, 3]);
+      expect(sourceCalls, 0);
+    },
+  );
+
   test('last release cancels production source resolution scope', () async {
     final started = Completer<RequestScope>();
     final configuration = Completer<Map<String, dynamic>>();
@@ -76,4 +100,62 @@ void main() {
     await pumpEventQueue();
     expect(await cache.findCache('image@source@comic@chapter'), isNull);
   });
+
+  test(
+    'thumbnail release cancels source resolution and frees late callback',
+    () async {
+      final started = Completer<RequestScope>();
+      final configuration = Completer<Map<String, dynamic>>();
+      final callback = _UnusedResponseCallback();
+      ImageDownloader.configureSourceImageLoading(
+        thumbnailLoadingConfig: (source, url) {
+          started.complete(RequestScope.current!);
+          return configuration.future;
+        },
+      );
+      final errors = <Object>[];
+      final subscription = ImageDownloader.loadThumbnail(
+        'cover',
+        'source',
+      ).listen((_) {}, onError: errors.add);
+      addTearDown(() async {
+        await subscription.cancel();
+        if (!configuration.isCompleted) {
+          configuration.complete({'onResponse': callback});
+        }
+        await pumpEventQueue();
+      });
+
+      final scope = await started.future.timeout(const Duration(seconds: 1));
+      await subscription.cancel().timeout(const Duration(seconds: 1));
+
+      expect(scope.cancelToken.isCancelled, isTrue);
+      expect(configuration.isCompleted, isFalse);
+      configuration.complete({
+        'url': 'https://example.invalid/late',
+        'onResponse': callback,
+      });
+      await pumpEventQueue();
+
+      expect(callback.destroyCount, 1);
+      expect(errors, isEmpty);
+      expect(await cache.findCache('cover@source'), isNull);
+    },
+  );
+}
+
+class _UnusedResponseCallback extends JSInvokable {
+  int destroyCount = 0;
+
+  @override
+  dynamic invoke(List args, [dynamic thisVal]) {
+    throw StateError(
+      'Cancelled thumbnail must not invoke its response callback',
+    );
+  }
+
+  @override
+  void destroy() {
+    destroyCount++;
+  }
 }

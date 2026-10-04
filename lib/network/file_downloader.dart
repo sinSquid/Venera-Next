@@ -18,6 +18,16 @@ class FileDownloader {
     this.maxConcurrent = 4,
     int? chunkSize,
   }) {
+    if (maxConcurrent <= 0) {
+      throw ArgumentError.value(
+        maxConcurrent,
+        'maxConcurrent',
+        'must be positive',
+      );
+    }
+    if (chunkSize != null && chunkSize <= 0) {
+      throw ArgumentError.value(chunkSize, 'chunkSize', 'must be positive');
+    }
     if (chunkSize != null) {
       _kChunkSize = chunkSize;
     }
@@ -62,35 +72,64 @@ class FileDownloader {
     }
 
     var lines = await file.readAsLines();
-    _blocks = lines.map((e) => _DownloadBlock.fromString(e)).toList();
+    final blocks = lines.map((e) => _DownloadBlock.fromString(e)).toList();
+    var nextStart = 0;
+    for (final block in blocks) {
+      if (block.start != nextStart ||
+          block.end <= block.start ||
+          block.end > _fileSize ||
+          block.downloadedBytes < 0 ||
+          block.downloadedBytes > block.end - block.start) {
+        throw FormatException(
+          'Invalid download resume status: invalid block ${block.start}-${block.end}',
+        );
+      }
+      nextStart = block.end;
+    }
+    if (nextStart != _fileSize) {
+      throw FormatException(
+        'Invalid download resume status: expected $_fileSize bytes of block coverage, found $nextStart',
+      );
+    }
+    _blocks = blocks;
   }
 
   /// create file and write empty bytes
-  Future<void> _prepareFile() async {
+  Future<bool> _prepareFile() async {
     var file = File(savePath);
+    final statusFile = File('$savePath.download');
     if (await file.exists()) {
-      if (file.lengthSync() == _fileSize &&
-          File("$savePath.download").existsSync()) {
+      if (await file.length() == _fileSize && await statusFile.exists()) {
         _file = await file.open(mode: FileMode.append);
-        return;
+        return true;
       } else {
         await file.delete();
       }
     }
+    // Completed offsets are meaningful only for the original data file.
+    if (await statusFile.exists()) await statusFile.delete();
 
     await file.create(recursive: true);
     _file = await file.open(mode: FileMode.append);
     await _file!.truncate(_fileSize);
+    return false;
   }
 
   Future<void> _createTasks() async {
-    var res = await _dio.head(url, cancelToken: _cancelToken);
-    var length = res.headers["content-length"]?.first;
-    _fileSize = length == null ? 0 : int.parse(length);
+    var res = await _dio.head(
+      url,
+      options: Options(headers: {'Accept-Encoding': 'identity'}),
+      cancelToken: _cancelToken,
+    );
+    final length = int.tryParse(res.headers.value('content-length') ?? '');
+    if (length == null || length < 0) {
+      throw StateError('Download requires a valid Content-Length');
+    }
+    _fileSize = length;
 
-    await _prepareFile();
+    final canResume = await _prepareFile();
 
-    if (File("$savePath.download").existsSync()) {
+    if (canResume) {
       await _readStatus();
       _currentBytes = _blocks.fold<int>(
         0,
@@ -147,10 +186,12 @@ class FileDownloader {
       }
 
       // check if file is downloaded
-      if (_currentBytes >= _fileSize) {
+      if (_currentBytes == _fileSize) {
         await _file!.close();
         _file = null;
-        _reportStatus(resultStream);
+        final statusFile = File('$savePath.download');
+        if (await statusFile.exists()) await statusFile.delete();
+        resultStream.add(DownloadingStatus(_currentBytes, _fileSize, 0, true));
         resultStream.close();
         return;
       }
@@ -181,10 +222,8 @@ class FileDownloader {
       await _writeQueue;
       await _file!.close();
       _file = null;
-      await File("$savePath.download").delete();
-
       // check if download is finished
-      if (_currentBytes < _fileSize) {
+      if (_currentBytes != _fileSize) {
         resultStream.addError(
           Exception(
             "Download failed: Expected $_fileSize bytes, "
@@ -195,6 +234,7 @@ class FileDownloader {
         return;
       }
 
+      await File("$savePath.download").delete();
       resultStream.add(DownloadingStatus(_currentBytes, _fileSize, 0, true));
       resultStream.close();
     } catch (e, s) {
@@ -214,6 +254,7 @@ class FileDownloader {
       resultStream.close();
     } finally {
       statusTimer?.cancel();
+      _dio.close();
     }
   }
 
@@ -271,6 +312,8 @@ class FileDownloader {
   Future<void> _fetchBlock(_DownloadBlock block) async {
     final start = block.start;
     final end = block.end;
+    final requestStart = start + block.downloadedBytes;
+    final expectedBytes = end - requestStart;
 
     if (start > _fileSize) {
       return;
@@ -279,33 +322,83 @@ class FileDownloader {
     var options = Options(
       responseType: ResponseType.stream,
       headers: {
-        "Range": "bytes=${start + block.downloadedBytes}-${end - 1}",
+        "Range": "bytes=$requestStart-${end - 1}",
         "Accept": "*/*",
-        "Accept-Encoding": "deflate, gzip",
+        "Accept-Encoding": "identity",
       },
       preserveHeaderCase: true,
     );
-    var res = await _dio.get<ResponseBody>(
-      url,
-      options: options,
-      cancelToken: _cancelToken,
-    );
-    if (_canceled) return;
+    final Response<ResponseBody> res;
+    try {
+      res = await _dio.get<ResponseBody>(
+        url,
+        options: options,
+        cancelToken: _cancelToken,
+      );
+    } on DioException catch (error) {
+      final body = error.response?.data;
+      if (body is ResponseBody) {
+        await StreamIterator(body.stream).cancel();
+      }
+      rethrow;
+    }
     if (res.data == null) {
       throw Exception("Failed to block $start-$end");
     }
-
-    var buffer = <int>[];
-    await for (var data in res.data!.stream) {
+    final iterator = StreamIterator(res.data!.stream);
+    try {
       if (_canceled) return;
-      buffer.addAll(data);
-      if (buffer.length > 16 * 1024) {
+      final encoding = res.headers.value('content-encoding');
+      if (encoding != null && encoding.toLowerCase() != 'identity') {
+        throw StateError('Download range response must not be compressed');
+      }
+      if (res.statusCode == HttpStatus.partialContent) {
+        final contentRange = res.headers.value('content-range') ?? '';
+        final match = RegExp(
+          r'^bytes (\d+)-(\d+)/(\d+)$',
+        ).firstMatch(contentRange.trim());
+        if (match == null ||
+            int.parse(match.group(1)!) != requestStart ||
+            int.parse(match.group(2)!) != end - 1 ||
+            int.parse(match.group(3)!) != _fileSize) {
+          throw StateError(
+            'Invalid Content-Range for requested download block',
+          );
+        }
+      } else if (res.statusCode != HttpStatus.ok ||
+          requestStart != 0 ||
+          end != _fileSize) {
+        // A server without range support is safe only for one complete request.
+        throw StateError('Server did not honor the requested download range');
+      }
+
+      var buffer = <int>[];
+      var receivedBytes = 0;
+      while (await iterator.moveNext()) {
+        if (_canceled) return;
+        final data = iterator.current;
+        receivedBytes += data.length;
+        if (receivedBytes > expectedBytes) {
+          throw StateError(
+            'Download range response exceeded $expectedBytes bytes',
+          );
+        }
+        buffer.addAll(data);
+        if (buffer.length > 16 * 1024) {
+          await _writeBlockBuffer(block, buffer);
+        }
+      }
+
+      if (buffer.isNotEmpty) {
         await _writeBlockBuffer(block, buffer);
       }
-    }
-
-    if (buffer.isNotEmpty) {
-      await _writeBlockBuffer(block, buffer);
+      if (receivedBytes != expectedBytes) {
+        throw StateError(
+          'Incomplete download range: expected $expectedBytes bytes, received $receivedBytes',
+        );
+      }
+    } finally {
+      await iterator.cancel();
     }
   }
 
@@ -381,9 +474,19 @@ class _DownloadBlock {
     return "$start-$end-$downloadedBytes";
   }
 
-  _DownloadBlock.fromString(String str)
-    : start = int.parse(str.split("-")[0]),
-      end = int.parse(str.split("-")[1]),
-      downloadedBytes = int.parse(str.split("-")[2]),
-      downloading = false;
+  factory _DownloadBlock.fromString(String str) {
+    final fields = str.split('-');
+    if (fields.length != 3) {
+      throw FormatException(
+        'Invalid download resume status: malformed block',
+        str,
+      );
+    }
+    return _DownloadBlock(
+      int.parse(fields[0]),
+      int.parse(fields[1]),
+      int.parse(fields[2]),
+      false,
+    );
+  }
 }

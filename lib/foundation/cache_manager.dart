@@ -158,17 +158,7 @@ class CacheManager {
     var file = File('$_cachePath/$dir/$name');
     var now = DateTime.now().millisecondsSinceEpoch;
     if (expires < now) {
-      // expired
-      _db.execute(
-        '''
-        DELETE FROM cache
-        WHERE key = ?
-      ''',
-        [key],
-      );
-      if (await file.exists()) {
-        await file.delete();
-      }
+      await _delete(key);
       return null;
     }
     if (await file.exists()) {
@@ -207,12 +197,13 @@ class CacheManager {
   Future<void> checkCache() => _enqueue(_checkCache);
 
   Future<void> _checkCache() async {
+    final now = DateTime.now().millisecondsSinceEpoch;
     var res = _db.select(
       '''
         SELECT * FROM cache
         WHERE expires < ?
       ''',
-      [DateTime.now().millisecondsSinceEpoch],
+      [now],
     );
     for (var row in res) {
       var dir = row['dir'] as String;
@@ -230,7 +221,7 @@ class CacheManager {
         DELETE FROM cache
         WHERE expires < ?
       ''',
-        [DateTime.now().millisecondsSinceEpoch],
+        [now],
       );
     }
 
@@ -245,6 +236,7 @@ class CacheManager {
         // Clear all cache.
         await Directory(_cachePath).delete(recursive: true);
         Directory(_cachePath).createSync(recursive: true);
+        _currentSize = 0;
         break;
       }
       for (var row in res) {
