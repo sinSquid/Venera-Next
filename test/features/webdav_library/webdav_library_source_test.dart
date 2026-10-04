@@ -205,6 +205,55 @@ void main() {
     expect(cached.data.single.title, 'Cached Book');
   });
 
+  for (final failedPath in ['/manga/Category/', '/manga/Category/Book B/']) {
+    test(
+      'failed discovery at $failedPath preserves the complete cached index',
+      () async {
+        ops.dirs['/manga/'] = const [
+          WebDavLibraryEntry(name: 'Category', isDirectory: true),
+        ];
+        ops.dirs['/manga/Category/'] = const [
+          WebDavLibraryEntry(name: 'Book A', isDirectory: true),
+          WebDavLibraryEntry(name: 'Book B', isDirectory: true),
+        ];
+        for (final name in ['Book A', 'Book B']) {
+          ops.dirs['/manga/Category/$name/'] = const [
+            WebDavLibraryEntry(name: 'metadata.json', isDirectory: false),
+            WebDavLibraryEntry(name: '001.jpg', isDirectory: false),
+          ];
+          ops.textFiles['/manga/Category/$name/metadata.json'] = jsonEncode({
+            'title': 'Cached $name',
+            'author': '',
+            'tags': <String>[],
+          });
+        }
+        expect((await source.synchronizer.synchronize()).success, isTrue);
+        final lastSync = source.synchronizer.status.value.lastSuccessfulSync;
+        ops.errors[failedPath] = StateError('Temporarily unavailable');
+
+        final refresh = await source.synchronizer.synchronize(force: true);
+        final cached = await source.loadComics(1);
+
+        expect(refresh.error, isTrue);
+        expect(source.synchronizer.status.value.lastSuccessfulSync, lastSync);
+        expect(cached.success, isTrue);
+        expect(cached.data.map((comic) => comic.id), [
+          'Category/Book A',
+          'Category/Book B',
+        ]);
+        expect(cached.data.map((comic) => comic.title), [
+          'Cached Book A',
+          'Cached Book B',
+        ]);
+        ops.errors.clear();
+        expect(
+          (await source.synchronizer.synchronize(force: true)).success,
+          isTrue,
+        );
+      },
+    );
+  }
+
   test('concurrent detail loads share one snapshot request', () async {
     ops.dirs['/manga/Book/'] = const [
       WebDavLibraryEntry(name: '001.jpg', isDirectory: false),

@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:isolate';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sqlite3/sqlite3.dart';
@@ -21,6 +22,33 @@ bool _sqliteAvailable() {
     return true;
   } catch (_) {
     return false;
+  }
+}
+
+Future<void> _holdTemporaryWriteLock(
+  (String, SendPort, SendPort) arguments,
+) async {
+  final (path, ready, completed) = arguments;
+  final release = ReceivePort();
+  Database? db;
+  String? failure;
+  try {
+    db = sqlite3.open(path);
+    db.execute('BEGIN EXCLUSIVE;');
+    db.execute("INSERT INTO items (value) VALUES ('released');");
+    ready.send(release.sendPort);
+    await release.first;
+    // This timer must run in another isolate: opening the second SQLite
+    // connection synchronously blocks the test isolate until the lock clears.
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+    db.execute('COMMIT;');
+  } catch (error) {
+    failure = error.toString();
+    ready.send(failure);
+  } finally {
+    db?.dispose();
+    release.close();
+    completed.send(failure);
   }
 }
 
@@ -93,6 +121,50 @@ void main() {
       });
 
       expect(count, 1);
+    },
+    skip: sqliteAvailable ? false : 'sqlite3 native library is unavailable',
+  );
+
+  test(
+    'openSqliteDatabase waits for a short lock during PRAGMA setup',
+    () async {
+      final dir = Directory.systemTemp.createTempSync('venera-sqlite-open-');
+      final dbPath = '${dir.path}/lock.db';
+      _initializeDatabase(dbPath);
+      final ready = ReceivePort();
+      final completed = ReceivePort();
+      final completion = completed.first;
+      final worker = await Isolate.spawn(_holdTemporaryWriteLock, (
+        dbPath,
+        ready.sendPort,
+        completed.sendPort,
+      ));
+      try {
+        final release = await ready.first.timeout(const Duration(seconds: 5));
+        expect(release, isA<SendPort>());
+        (release as SendPort).send(null);
+
+        final db = openSqliteDatabase(dbPath);
+        try {
+          expect(
+            db
+                .select('SELECT value FROM items ORDER BY id;')
+                .map((r) => r['value']),
+            ['seed', 'released'],
+          );
+        } finally {
+          db.dispose();
+        }
+      } finally {
+        try {
+          expect(await completion.timeout(const Duration(seconds: 5)), isNull);
+        } finally {
+          worker.kill(priority: Isolate.immediate);
+          ready.close();
+          completed.close();
+          dir.deleteSync(recursive: true);
+        }
+      }
     },
     skip: sqliteAvailable ? false : 'sqlite3 native library is unavailable',
   );

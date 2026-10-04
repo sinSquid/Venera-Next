@@ -153,6 +153,74 @@ void main() {
   });
 
   group('ComicBackupManager.backup', () {
+    test('long Unicode titles fit local staging filenames', () async {
+      appdata.settings['backupWebdav'] = ['https://example.com/dav', 'u', 'p'];
+      final comic = _comic('漫' * 80);
+      final fakeOps = _FakeBackupOps();
+      ComicBackupManager.ops = fakeOps;
+      ComicBackupManager.exportComic = (comic, path) async {
+        File(path).writeAsStringSync(comic.title);
+      };
+
+      final result = await ComicBackupManager.backup([comic]);
+
+      expect(result.success, 1, reason: result.errors.toString());
+      expect(result.failed, 0);
+      expect(fakeOps.uploadedRemotePaths, [
+        '/venera_backup/${ComicBackupManager.backupFileName(comic)}',
+      ]);
+      expect(Directory(App.cachePath).listSync(), isEmpty);
+    });
+
+    test(
+      'a successful upload is skipped when repeated in the same batch',
+      () async {
+        appdata.settings['backupWebdav'] = [
+          'https://example.com/dav',
+          'u',
+          'p',
+        ];
+        final fakeOps = _FakeBackupOps();
+        ComicBackupManager.ops = fakeOps;
+        var exports = 0;
+        ComicBackupManager.exportComic = (comic, path) async {
+          exports++;
+          File(path).writeAsStringSync(comic.title);
+        };
+
+        final result = await ComicBackupManager.backup([
+          _comic('Same'),
+          _comic('Same'),
+        ]);
+
+        expect(result.success, 1);
+        expect(result.skipped, 1);
+        expect(result.failed, 0);
+        expect(exports, 1);
+        expect(fakeOps.uploadedRemotePaths, hasLength(1));
+      },
+    );
+
+    test('a failed upload remains retryable within the same batch', () async {
+      appdata.settings['backupWebdav'] = ['https://example.com/dav', 'u', 'p'];
+      final fakeOps = _FakeBackupOps(failedUploads: 1);
+      ComicBackupManager.ops = fakeOps;
+      ComicBackupManager.exportComic = (comic, path) async {
+        File(path).writeAsStringSync(comic.title);
+      };
+
+      final result = await ComicBackupManager.backup([
+        _comic('Same'),
+        _comic('Same'),
+      ]);
+
+      expect(result.success, 1);
+      expect(result.skipped, 0);
+      expect(result.failed, 1);
+      expect(fakeOps.uploadedRemotePaths, hasLength(2));
+      expect(Directory(App.cachePath).listSync(), isEmpty);
+    });
+
     test(
       'counts success and skipped files and deletes temporary exports',
       () async {
@@ -178,7 +246,7 @@ void main() {
         final result = await ComicBackupManager.backup([
           dupComic,
           freshComic,
-        ], onProgress: (_, _, __) {});
+        ], onProgress: (_, _, _) {});
         uploadedPaths.addAll(fakeOps.uploadedRemotePaths);
 
         expect(result.success, 1);
@@ -213,6 +281,55 @@ void main() {
   });
 
   group('ComicBackupManager.restore', () {
+    test(
+      'failed import cleans staging and retains existing cache files',
+      () async {
+        appdata.settings['backupWebdav'] = [
+          'https://example.com/dav',
+          'u',
+          'p',
+        ];
+        final existing = File('${App.cachePath}/A.cbz')
+          ..writeAsStringSync('existing');
+        ComicBackupManager.importComic = (_) async =>
+            throw StateError('import');
+
+        final result = await ComicBackupManager.restore([
+          BackupFile(name: 'A.cbz', size: 1, modified: DateTime(2024)),
+        ]);
+
+        expect(result.success, 0);
+        expect(result.failed, 1);
+        expect(existing.readAsStringSync(), 'existing');
+        expect(Directory(App.cachePath).listSync().map((entry) => entry.path), [
+          existing.path,
+        ]);
+      },
+    );
+
+    test('long remote filenames fit local restore staging', () async {
+      appdata.settings['backupWebdav'] = ['https://example.com/dav', 'u', 'p'];
+      final name = '${'A' * 250}.cbz';
+      final fakeOps = _FakeBackupOps();
+      ComicBackupManager.ops = fakeOps;
+      String? importedPath;
+      ComicBackupManager.importComic = (path) async {
+        importedPath = path;
+        expect(File(path).readAsStringSync(), '/venera_backup/$name');
+        return _comic('Imported');
+      };
+      ComicBackupManager.registerImportedComic = (_) async {};
+
+      final result = await ComicBackupManager.restore([
+        BackupFile(name: name, size: 1, modified: DateTime(2024)),
+      ]);
+
+      expect(result.success, 1, reason: result.errors.toString());
+      expect(result.failed, 0);
+      expect(File(importedPath!).uri.pathSegments.last, name);
+      expect(Directory(App.cachePath).listSync(), isEmpty);
+    });
+
     test('downloads and imports selected backups', () async {
       appdata.settings['backupWebdav'] = ['https://example.com/dav', 'u', 'p'];
       final importedPaths = <String>[];
@@ -270,9 +387,10 @@ LocalComic _comic(String title) {
 }
 
 class _FakeBackupOps implements ComicBackupWebDavOps {
-  _FakeBackupOps({this.listResult = const []});
+  _FakeBackupOps({this.listResult = const [], this.failedUploads = 0});
 
   final List<BackupFile> listResult;
+  int failedUploads;
   String? listedPath;
   String? testedPath;
   final uploadedRemotePaths = <String>[];
@@ -304,6 +422,10 @@ class _FakeBackupOps implements ComicBackupWebDavOps {
     String remotePath,
   ) async {
     uploadedRemotePaths.add(remotePath);
+    if (failedUploads > 0) {
+      failedUploads--;
+      throw StateError('Upload failed');
+    }
   }
 
   @override

@@ -112,6 +112,62 @@ void main() {
     );
   }
 
+  for (final cancel in [false, true]) {
+    test(
+      'synchronous ${cancel ? 'cancel' : 'pause'} failure drains previous and own cleanup',
+      () async {
+        final previousCleanup = Completer<void>();
+        final ownCleanup = Completer<void>();
+        final first = _Task('a', events)..cleanup = previousCleanup.future;
+        final second = _Task('b', events)..cleanup = ownCleanup.future;
+        queue.add(first);
+        queue.add(second);
+        final moved = queue.moveToFirst(second);
+        second.onPause = () => throw StateError('stop failed');
+        events.clear();
+        final stopped = cancel ? queue.cancel(second) : queue.pause(second);
+        var finished = false;
+        final failure = expectLater(stopped, throwsStateError).then((_) {
+          finished = true;
+        });
+
+        await pumpEventQueue();
+        expect(finished, isFalse);
+        (cancel ? ownCleanup : previousCleanup).complete();
+        await pumpEventQueue();
+        expect(finished, isFalse);
+        queue.resume(second);
+        expect(events.where((event) => event.startsWith('resume:')), isEmpty);
+
+        (cancel ? previousCleanup : ownCleanup).complete();
+        await Future.wait([moved, failure]);
+        await pumpEventQueue();
+        expect(finished, isTrue);
+        expect(events.where((event) => event.startsWith('resume:')), isEmpty);
+      },
+    );
+  }
+
+  test('suspension drains cleanup even when a later pause throws', () async {
+    final cleanup = Completer<void>();
+    final first = _Task('a', events)..cleanup = cleanup.future;
+    final second = _Task('b', events)
+      ..onPause = () => throw StateError('stop failed');
+    queue.restorePausedTasks([first, second]);
+    var finished = false;
+    final suspended = queue.suspend();
+    final failure = expectLater(suspended, throwsStateError).then((_) {
+      finished = true;
+    });
+    await pumpEventQueue();
+    expect(finished, isFalse);
+    expect(() => queue.releaseSuspension(suspended), throwsStateError);
+    cleanup.complete();
+    await failure;
+    expect(finished, isTrue);
+    queue.releaseSuspension(suspended);
+  });
+
   test(
     'manual pause cancels pending start and manual resume respects prior stop',
     () async {

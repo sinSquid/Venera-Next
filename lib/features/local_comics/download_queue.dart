@@ -253,17 +253,30 @@ class DownloadQueue {
     }
 
     // Install the barrier before stop can notify/reenter queue operations.
+    Object? stopError;
+    StackTrace? stopStack;
     try {
       stop();
-      unawaited(
-        Future.wait<void>([?previous, task.pendingCleanup]).then<void>(
-          (_) => finish(),
-          onError: (Object error, StackTrace stack) => finish(error, stack),
-        ),
-      );
     } catch (error, stack) {
-      scheduleMicrotask(() => finish(error, stack));
+      stopError = error;
+      stopStack = stack;
     }
+    final cleanup = <Future<void>>[?previous];
+    try {
+      // A stop can begin asynchronous cleanup before it throws. Both that work
+      // and older stops still own storage until they have drained.
+      cleanup.add(task.pendingCleanup);
+    } catch (error, stack) {
+      stopError ??= error;
+      stopStack ??= stack;
+    }
+    unawaited(
+      Future.wait<void>(cleanup).then<void>(
+        (_) => finish(stopError, stopStack),
+        onError: (Object error, StackTrace stack) =>
+            finish(stopError ?? error, stopStack ?? stack),
+      ),
+    );
     return stopped;
   }
 }

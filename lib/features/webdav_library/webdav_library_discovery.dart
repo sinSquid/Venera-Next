@@ -13,6 +13,7 @@ class WebDavLibraryDiscovery {
   Future<List<WebDavDiscoveredDirectory>> discover({
     required List<WebDavLibraryEntry> rootEntries,
     required bool Function(WebDavLibraryEntry directory) canReuse,
+    bool failOnReadError = false,
   }) async {
     session.check();
     final config = session.config;
@@ -43,7 +44,7 @@ class WebDavLibraryDiscovery {
             await session.readDir(path),
           );
         } catch (e) {
-          if (e is WebDavLibraryCancelled) rethrow;
+          if (e is WebDavLibraryCancelled || failOnReadError) rethrow;
           Log.warning(
             'WebDAV Library',
             'Failed to inspect nested directory at $path: $e',
@@ -87,7 +88,7 @@ class WebDavLibraryDiscovery {
       try {
         entries = List<WebDavLibraryEntry>.from(await session.readDir(path));
       } catch (e) {
-        if (e is WebDavLibraryCancelled) rethrow;
+        if (e is WebDavLibraryCancelled || failOnReadError) rethrow;
         Log.warning(
           'WebDAV Library',
           'Failed to inspect directory at $path: $e',

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:venera_next/foundation/app.dart';
@@ -90,6 +92,127 @@ void main() {
     await selection.dispose();
     expect(calls, ['prepareFile']);
   });
+
+  test('concurrent preparation copies a document only once', () async {
+    final response = Completer<Map<String, dynamic>>();
+    var preparations = 0;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+          if (call.method == 'prepareFile') {
+            preparations++;
+            return response.future;
+          }
+          return null;
+        });
+    final selection = FileSelection.androidDocument(
+      uri: 'content://books/1',
+      name: 'Book.pdf',
+    );
+    final first = selection.prepare();
+    final second = selection.prepare();
+    await pumpEventQueue();
+    expect(preparations, 1);
+    response.complete({'path': '/cache/Book.pdf', 'temporary': true});
+    expect((await first).path, '/cache/Book.pdf');
+    expect((await second).path, '/cache/Book.pdf');
+    await selection.dispose();
+  });
+
+  test('disposal waits for and releases a late temporary copy once', () async {
+    final response = Completer<Map<String, dynamic>>();
+    final release = Completer<void>();
+    final calls = <String>[];
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+          calls.add(call.method);
+          if (call.method == 'prepareFile') return response.future;
+          await release.future;
+          return null;
+        });
+    final selection = FileSelection.androidDocument(
+      uri: 'content://books/1',
+      name: 'Book.pdf',
+    );
+    final preparation = expectLater(selection.prepare(), throwsStateError);
+    var disposed = false;
+    final disposal = selection.dispose().then((_) => disposed = true);
+    final secondDisposal = selection.dispose();
+    await pumpEventQueue();
+    expect(disposed, isFalse);
+    response.complete({'path': '/cache/Book.pdf', 'temporary': true});
+    await preparation;
+    await pumpEventQueue();
+    expect(calls, ['prepareFile', 'releaseFile']);
+    expect(disposed, isFalse);
+    release.complete();
+    await Future.wait([disposal, secondDisposal]);
+    expect(disposed, isTrue);
+    await expectLater(selection.prepare(), throwsStateError);
+  });
+
+  test('failed preparation can be retried before disposal', () async {
+    var attempts = 0;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+          if (call.method == 'prepareFile') {
+            if (++attempts == 1) throw PlatformException(code: 'copy_error');
+            return {'path': '/source/Book.pdf', 'temporary': false};
+          }
+          fail('A source file must not be released');
+        });
+    final selection = FileSelection.androidDocument(
+      uri: 'content://books/1',
+      name: 'Book.pdf',
+    );
+    await expectLater(selection.prepare(), throwsA(isA<PlatformException>()));
+    expect((await selection.prepare()).path, '/source/Book.pdf');
+    expect(attempts, 2);
+    await selection.dispose();
+  });
+
+  test('disposal completes when pending preparation fails', () async {
+    final response = Completer<Map<String, dynamic>>();
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async => response.future);
+    final selection = FileSelection.androidDocument(
+      uri: 'content://books/1',
+      name: 'Book.pdf',
+    );
+    final preparation = expectLater(
+      selection.prepare(),
+      throwsA(isA<PlatformException>()),
+    );
+    final disposal = selection.dispose();
+    await pumpEventQueue();
+    response.completeError(PlatformException(code: 'copy_error'));
+    await preparation;
+    await disposal;
+    await expectLater(selection.prepare(), throwsStateError);
+  });
+
+  test(
+    'desktop directory selection uses the registered file selector',
+    () async {
+      if (!App.isDesktop) return;
+      const selectorChannel = MethodChannel('plugins.flutter.io/file_selector');
+      final calls = <String>[];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(selectorChannel, (call) async {
+            calls.add(call.method);
+            return '/selected/comics';
+          });
+      addTearDown(() {
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(selectorChannel, null);
+      });
+      expect(
+        (await DirectoryPicker().pickDirectory())?.path,
+        '/selected/comics',
+      );
+      expect(calls, ['getDirectoryPath']);
+      await Future<void>.delayed(const Duration(milliseconds: 110));
+    },
+  );
 
   test(
     'unprepared and failed selections do not release unrelated paths',

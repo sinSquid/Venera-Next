@@ -19,9 +19,19 @@ class IO {
   ///
   /// Select file and other similar file operations will launch external programs,
   /// causing the app to lose focus. AppLifecycleState will be set to paused.
-  static bool get isSelectingFiles => _isSelectingFiles;
+  static bool get isSelectingFiles => _activeSelections > 0;
 
-  static bool _isSelectingFiles = false;
+  static int _activeSelections = 0;
+
+  static void _beginSelection() => _activeSelections++;
+
+  static void _endSelection() {
+    // Keep the short focus-return grace period for each operation. An earlier
+    // picker finishing must not reset the state of another active picker.
+    Future<void>.delayed(const Duration(milliseconds: 100), () {
+      _activeSelections--;
+    });
+  }
 }
 
 /// Copy the **contents** of the source directory to the destination directory.
@@ -43,7 +53,7 @@ class DirectoryPicker {
     if (path.startsWith(App.cachePath)) {
       Directory(path).deleteIgnoreError();
     }
-    if (App.isIOS || App.isMacOS) {
+    if (App.isIOS) {
       _methodChannel.invokeMethod("stopAccessingSecurityScopedResource");
     }
   });
@@ -51,10 +61,10 @@ class DirectoryPicker {
   static const _methodChannel = MethodChannel("venera/method_channel");
 
   Future<Directory?> pickDirectory({bool directAccess = false}) async {
-    IO._isSelectingFiles = true;
+    IO._beginSelection();
     try {
       String? directory;
-      if (App.isWindows || App.isLinux) {
+      if (App.isDesktop) {
         directory = await file_selector.getDirectoryPath();
       } else if (App.isAndroid) {
         directory = (await AndroidDirectory.pickDirectory())?.path;
@@ -69,7 +79,7 @@ class DirectoryPicker {
           directory = cache;
         }
       } else {
-        // ios, macos
+        // iOS uses a security-scoped directory owned by the native picker.
         directory = await _methodChannel.invokeMethod<String?>(
           "getDirectoryPath",
         );
@@ -78,9 +88,7 @@ class DirectoryPicker {
       _finalizer.attach(this, directory);
       return Directory(directory);
     } finally {
-      Future.delayed(const Duration(milliseconds: 100), () {
-        IO._isSelectingFiles = false;
-      });
+      IO._endSelection();
     }
   }
 }
@@ -90,23 +98,18 @@ class IOSDirectoryPicker {
 
   // 调用 iOS 目录选择方法
   static Future<String?> selectDirectory() async {
-    IO._isSelectingFiles = true;
+    IO._beginSelection();
     try {
       final String? path = await _channel.invokeMethod('selectDirectory');
       return path;
-    } catch (e) {
-      // 返回报错信息
-      return e.toString();
     } finally {
-      Future.delayed(const Duration(milliseconds: 100), () {
-        IO._isSelectingFiles = false;
-      });
+      IO._endSelection();
     }
   }
 }
 
 Future<FileSelectResult?> selectFile({required List<String> ext}) async {
-  IO._isSelectingFiles = true;
+  IO._beginSelection();
   try {
     var extensions = App.isMacOS || App.isIOS ? null : ext;
     file_selector.XTypeGroup typeGroup = file_selector.XTypeGroup(
@@ -145,9 +148,7 @@ Future<FileSelectResult?> selectFile({required List<String> ext}) async {
     }
     return file;
   } finally {
-    Future.delayed(const Duration(milliseconds: 100), () {
-      IO._isSelectingFiles = false;
-    });
+    IO._endSelection();
   }
 }
 
@@ -155,7 +156,7 @@ Future<List<FileSelection>> selectFiles({
   required List<String> ext,
   List<String>? uniformTypeIdentifiers,
 }) async {
-  IO._isSelectingFiles = true;
+  IO._beginSelection();
   try {
     if (App.isAndroid) {
       final mimeType = ext.length == 1
@@ -184,9 +185,7 @@ Future<List<FileSelection>> selectFiles({
     );
     return files.map((file) => FileSelection(file.path)).toList();
   } finally {
-    Future.delayed(const Duration(milliseconds: 100), () {
-      IO._isSelectingFiles = false;
-    });
+    IO._endSelection();
   }
 }
 
@@ -196,59 +195,76 @@ class FileSelection {
   FileSelection(String path)
     : identifier = path,
       name = File(path).name,
-      _isDocument = false,
-      _file = FileSelectResult(path);
+      _file = File(path);
 
   FileSelection.androidDocument({required String uri, required this.name})
-    : identifier = uri,
-      _isDocument = true;
+    : identifier = uri;
 
   static const _channel = MethodChannel('venera/select_file');
 
   final String identifier;
   final String name;
-  final bool _isDocument;
-  FileSelectResult? _file;
+  // Explicit disposal owns only native copies. Avoid the legacy selection's
+  // path-based GC cleanup, which can mistake caller-owned cache files for copies.
+  File? _file;
   String? _temporaryPath;
   bool _disposed = false;
+  Future<File>? _preparing;
+  Future<void>? _disposing;
 
   Future<File> prepare() async {
     if (_disposed) throw StateError('File selection has been released');
-    if (_file == null && _isDocument) {
-      final result = await _channel.invokeMapMethod<String, dynamic>(
-        'prepareFile',
-        identifier,
-      );
-      if (result == null) throw StateError('Failed to prepare selected file');
-      final path = result['path'] as String;
-      if (result['temporary'] == true) _temporaryPath = path;
-      _file = FileSelectResult(path);
+    if (_file != null) return _file!;
+    final preparing = _preparing ??= _prepareDocument();
+    try {
+      final file = await preparing;
+      if (_disposed) throw StateError('File selection has been released');
+      return file;
+    } finally {
+      if (identical(_preparing, preparing)) _preparing = null;
     }
-    return File(_file!.path);
   }
 
-  Future<void> dispose() async {
-    if (_disposed) return;
+  Future<File> _prepareDocument() async {
+    final result = await _channel.invokeMapMethod<String, dynamic>(
+      'prepareFile',
+      identifier,
+    );
+    if (result == null) throw StateError('Failed to prepare selected file');
+    final path = result['path'] as String;
+    if (result['temporary'] == true) _temporaryPath = path;
+    return _file = File(path);
+  }
+
+  Future<void> dispose() => _disposing ??= _dispose();
+
+  Future<void> _dispose() async {
     _disposed = true;
+    // Preparation may still be copying a document. Wait for its path so that
+    // disposal also owns and releases temporary files returned after cancellation.
+    try {
+      await _preparing;
+    } catch (_) {
+      // The prepare caller receives this failure; no temporary file was returned.
+    }
     try {
       if (_temporaryPath != null) {
         await _channel.invokeMethod<void>('releaseFile', _temporaryPath);
       }
     } finally {
       _file = null;
+      _temporaryPath = null;
     }
   }
 }
 
 Future<String?> selectDirectory() async {
-  IO._isSelectingFiles = true;
+  IO._beginSelection();
   try {
     var path = await file_selector.getDirectoryPath();
     return path;
   } finally {
-    Future.delayed(const Duration(milliseconds: 100), () {
-      IO._isSelectingFiles = false;
-    });
+    IO._endSelection();
   }
 }
 
@@ -266,22 +282,26 @@ Future<bool> saveFile({
   if (data == null && file == null) {
     throw Exception("data and file cannot be null at the same time");
   }
-  IO._isSelectingFiles = true;
+  filename = sanitizeFileName(filename);
+  IO._beginSelection();
+  Directory? temporaryDirectory;
   try {
-    if (data != null) {
-      var cache = FilePath.join(App.cachePath, filename);
-      if (File(cache).existsSync()) {
-        File(cache).deleteSync();
+    if (data != null || App.isIOS) {
+      temporaryDirectory = await Directory(
+        App.cachePath,
+      ).createTemp('file-export-');
+      final exportFile = File(FilePath.join(temporaryDirectory.path, filename));
+      if (data != null) {
+        await exportFile.writeAsBytes(data);
+      } else {
+        await file!.copy(exportFile.path);
       }
-      await File(cache).writeAsBytes(data);
-      file = File(cache);
+      file = exportFile;
     }
     if (App.isMobile) {
-      // FIX: iOS export dialog cannot show filename and save.
-      final params = SaveFileDialogParams(
-        sourceFilePath: file!.path,
-        fileName: App.isIOS ? filename : null,
-      );
+      // iOS uses the source basename. Passing fileName makes the plugin copy to
+      // a shared temporary path, which can overwrite another export or source.
+      final params = SaveFileDialogParams(sourceFilePath: file!.path);
       final result = await FlutterFileDialog.saveFile(params: params);
       return result != null;
     } else {
@@ -296,9 +316,8 @@ Future<bool> saveFile({
       return false;
     }
   } finally {
-    Future.delayed(const Duration(milliseconds: 100), () {
-      IO._isSelectingFiles = false;
-    });
+    await temporaryDirectory?.deleteIgnoreError(recursive: true);
+    IO._endSelection();
   }
 }
 
@@ -318,8 +337,8 @@ final class _IOOverrides extends IOOverrides {
 
   @override
   File createFile(String path) {
-    if (path.startsWith("file://")) {
-      path = path.substring(7);
+    if (path.startsWith("file:")) {
+      path = Uri.parse(path).toFilePath();
     }
     if (App.isAndroid) {
       var f = AndroidFile.fromPathSync(path);

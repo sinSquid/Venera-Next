@@ -208,6 +208,9 @@ void main() {
         () async {
           await withFavorites((favorites) async {
             final folder = favorites.createFolder('PDFs');
+            // The fixture connection has no busy timeout. Drain the startup
+            // reader before installing the failure trigger through it.
+            await favorites.debugWaitForHashedIdsRefresh();
             final database = sqlite3.open(
               FilePath.join(App.dataPath, 'local_favorite.db'),
             );

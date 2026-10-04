@@ -1,7 +1,8 @@
 import 'package:path/path.dart' as p;
 
 /// Keep directories still referenced by another record, including overlapping
-/// roots. Comparisons are lexical; callers retain the original platform paths.
+/// roots. Comparisons are lexical; native paths are normalized before deletion,
+/// while Android SAF paths retain their URI representation.
 List<String> localDirectoriesToDelete({
   required Iterable<String> candidates,
   required Iterable<String> retained,
@@ -25,7 +26,7 @@ List<String> localDirectoriesToDelete({
     }
     if (seen.any((other) => p.equals(path, other))) continue;
     seen.add(path);
-    selected.add(candidate);
+    selected.add(candidate.startsWith('android://') ? candidate : path);
   }
   return selected;
 }

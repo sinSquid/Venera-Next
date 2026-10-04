@@ -44,42 +44,41 @@ class ImageFavoritesRepository {
       );
     } else {
       // 去重章节
-      List<ImageFavoritesEp> tempImageFavoritesEp = [];
+      final chapterNumbers = <int>{};
+      final tempImageFavoritesEp = <ImageFavoritesEp>[];
       for (var e in favorite.imageFavoritesEp) {
-        int index = tempImageFavoritesEp.indexWhere((i) {
-          return i.ep == e.ep;
-        });
         // 再做一层保险, 防止出现ep为0的脏数据
-        if (index == -1 && e.ep > 0) {
+        if (e.ep > 0 && chapterNumbers.add(e.ep)) {
           tempImageFavoritesEp.add(e);
         }
       }
       tempImageFavoritesEp.sort((a, b) => a.ep.compareTo(b.ep));
-      List<dynamic> finalImageFavoritesEp = jsonDecode(
-        jsonEncode(tempImageFavoritesEp),
-      );
+      final finalImageFavoritesEp = <Map<String, dynamic>>[];
       for (var e in tempImageFavoritesEp) {
-        List<Map> finalImageFavorites = [];
-        int epIndex = tempImageFavoritesEp.indexOf(e);
+        final pages = <int>{};
+        final uniqueImages = <ImageFavorite>[];
         for (ImageFavorite j in e.imageFavorites) {
-          int index = finalImageFavorites.indexWhere(
-            (i) => i["page"] == j.page,
-          );
-          if (index == -1 && j.page > 0) {
-            // isAutoFavorite 为 null 不写入数据库, 同时只保留需要的属性, 避免增加太多重复字段在数据库里
-            if (j.isAutoFavorite != null) {
-              finalImageFavorites.add({
-                "page": j.page,
-                "imageKey": j.imageKey,
-                "isAutoFavorite": j.isAutoFavorite,
-              });
-            } else {
-              finalImageFavorites.add({"page": j.page, "imageKey": j.imageKey});
-            }
+          if (j.page > 0 && pages.add(j.page)) {
+            uniqueImages.add(j);
           }
         }
-        finalImageFavorites.sort((a, b) => a["page"].compareTo(b["page"]));
-        finalImageFavoritesEp[epIndex]["imageFavorites"] = finalImageFavorites;
+        uniqueImages.sort((a, b) => a.page.compareTo(b.page));
+        // Build only the persisted fields, avoiding a full JSON round trip of
+        // the redundant per-image comic and chapter metadata.
+        finalImageFavoritesEp.add({
+          'eid': e.eid,
+          'ep': e.ep,
+          'maxPage': e.maxPage,
+          'epName': e.epName,
+          'imageFavorites': [
+            for (final image in uniqueImages)
+              {
+                'page': image.page,
+                'imageKey': image.imageKey,
+                'isAutoFavorite': ?image.isAutoFavorite,
+              },
+          ],
+        });
       }
       if (tempImageFavoritesEp.isEmpty) {
         throw "Error: No ImageFavoritesEp";

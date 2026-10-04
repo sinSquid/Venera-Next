@@ -291,11 +291,7 @@ class ComicBackupManager {
       onProgress?.call(i + 1, comics.length, comic.title);
       final fileName = backupFileName(comic);
       final remotePath = config.remoteFilePath(fileName);
-      final localPath = FilePath.join(
-        App.cachePath,
-        'comic_backup_${DateTime.now().microsecondsSinceEpoch}_$fileName',
-      );
-      final localFile = File(localPath);
+      Directory? workspace;
       try {
         final exists = listSuccess
             ? remoteFileNames.contains(fileName)
@@ -304,6 +300,10 @@ class ComicBackupManager {
           skipped++;
           continue;
         }
+        // Keep uniqueness in the parent directory so long valid archive names
+        // do not exceed the filesystem's filename limit after adding a prefix.
+        workspace = await Directory(App.cachePath).createTemp('comic-backup-');
+        final localPath = FilePath.join(workspace.path, fileName);
         final exporter = exportComic;
         if (exporter != null) {
           await exporter(comic, localPath);
@@ -311,12 +311,13 @@ class ComicBackupManager {
           await CBZ.export(comic, localPath);
         }
         await ops.uploadFile(config, localPath, remotePath);
+        remoteFileNames.add(fileName);
         success++;
       } catch (e) {
         failed++;
         errors.add('${comic.title}: $e');
       } finally {
-        await localFile.deleteIgnoreError();
+        await workspace?.deleteIgnoreError(recursive: true);
       }
     }
     return BackupResult(
@@ -349,12 +350,14 @@ class ComicBackupManager {
       final backup = files[i];
       onProgress?.call(i + 1, files.length, backup.name);
       final remotePath = config.remoteFilePath(backup.name);
-      final localPath = FilePath.join(
-        App.cachePath,
-        'comic_restore_${DateTime.now().microsecondsSinceEpoch}_${backup.name}',
-      );
-      final localFile = File(localPath);
+      Directory? workspace;
       try {
+        workspace = await Directory(App.cachePath).createTemp('comic-restore-');
+        // A metadata-free CBZ uses this basename as its title on import.
+        final localFile = File(
+          FilePath.join(workspace.path, sanitizeFileName(backup.name)),
+        );
+        final localPath = localFile.path;
         await ops.downloadFile(config, remotePath, localPath);
         Future<void> register(LocalComic comic) async {
           final callback = registerImportedComic;
@@ -379,7 +382,7 @@ class ComicBackupManager {
         failed++;
         errors.add('${backup.name}: $e');
       } finally {
-        await localFile.deleteIgnoreError();
+        await workspace?.deleteIgnoreError(recursive: true);
       }
     }
     return BackupResult(

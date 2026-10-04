@@ -105,10 +105,12 @@ class LocalRepository {
         [targetId, comic.comicType.value],
       );
     }
-    final downloaded = [
+    // A redownload can overlap the stored chapters. Keep one copy of each
+    // chapter so later saves and exports do not keep multiplying entries.
+    final downloaded = {
       ...comic.downloadedChapters,
       ...?old?.downloadedChapters,
-    ];
+    }.toList();
     db.execute(
       'INSERT OR REPLACE INTO comics (id, title, subtitle, tags, directory, chapters, cover, comic_type, downloadedChapters, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);',
       [

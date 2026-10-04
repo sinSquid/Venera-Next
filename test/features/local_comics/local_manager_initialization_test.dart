@@ -14,6 +14,27 @@ void main() {
   tearDown(() => root.deleteSync(recursive: true));
 
   test(
+    'write probe preserves existing library files and removes its own',
+    () async {
+      final library = Directory('${root.path}/selected-library')..createSync();
+      final existing = File('${library.path}/venera_test')
+        ..writeAsStringSync('user content');
+      File('${root.path}/local_path').writeAsStringSync(library.path);
+      final manager = LocalManager.forTesting(
+        openDatabase: sqlite3.open,
+        initializeSources: () async {},
+      );
+      addTearDown(manager.dispose);
+
+      await manager.init();
+
+      expect(manager.path, library.path);
+      expect(existing.readAsStringSync(), 'user content');
+      expect(library.listSync().map((entry) => entry.path), [existing.path]);
+    },
+  );
+
+  test(
     'concurrent and completed initialization reuse one connection and future',
     () async {
       var opens = 0;

@@ -147,7 +147,6 @@ void main() {
       expect(repository.find('1', const ComicType(17))!.downloadedChapters, [
         'new',
         'old',
-        'old',
       ]);
       db.execute(
         "UPDATE natural_sort_migration SET history_time = 99, old_page = 4, new_page = 2;",
@@ -181,6 +180,45 @@ void main() {
       db.dispose();
     }
   });
+
+  test(
+    'repeated saves normalize overlapping and legacy duplicate chapters',
+    () {
+      final db = sqlite3.openInMemory();
+      final repository = LocalRepository(db)..initialize();
+      addTearDown(db.dispose);
+      final comic = LocalComic(
+        id: '1',
+        title: 'Title',
+        subtitle: '',
+        tags: const [],
+        directory: 'folder',
+        chapters: null,
+        cover: '',
+        comicType: const ComicType(17),
+        downloadedChapters: const ['new', 'new', 'shared'],
+        createdAt: DateTime(2026),
+      );
+      repository.add(comic);
+      expect(repository.find('1', comic.comicType)!.downloadedChapters, [
+        'new',
+        'shared',
+      ]);
+      db.execute('UPDATE comics SET downloadedChapters = ?', [
+        '["shared","old","old"]',
+      ]);
+      repository.add(comic);
+      for (var index = 0; index < 10; index++) {
+        repository.add(repository.find('1', comic.comicType)!);
+      }
+      expect(repository.find('1', comic.comicType)!.downloadedChapters, [
+        'new',
+        'shared',
+        'old',
+      ]);
+      expect(comic.downloadedChapters, ['new', 'new', 'shared']);
+    },
+  );
 
   test(
     'local queries retain source identity, sort rules, limits and bound search',

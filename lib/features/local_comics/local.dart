@@ -14,6 +14,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_saf/flutter_saf.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:sqlite3/sqlite3.dart';
+import 'package:uuid/uuid.dart';
 import 'package:venera_next/features/comic_source/comic_source.dart';
 import 'package:venera_next/features/comic_storage/comic_storage.dart';
 import 'package:venera_next/foundation/comic_type.dart';
@@ -186,9 +187,13 @@ class LocalManager with ChangeNotifier {
   }
 
   Future<void> _checkPathValidation() async {
-    var testFile = File(FilePath.join(path, 'venera_test'));
+    // Probe only a file owned by this initialization. A fixed name can collide
+    // with and delete a user's file in a custom library directory.
+    final testFile = File(
+      FilePath.join(path, '.venera-write-test-${const Uuid().v4()}'),
+    );
     try {
-      testFile.createSync();
+      testFile.createSync(exclusive: true);
       testFile.deleteSync();
     } catch (e) {
       Log.error(

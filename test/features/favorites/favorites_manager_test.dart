@@ -638,6 +638,9 @@ void main() {
     'failed and same-folder transfers do not notify or change cached counts',
     () async {
       await _withFavoritesManager((manager) async {
+        // Trigger setup uses a separate raw SQLite connection; finish the
+        // startup reader before testing transfer rollback and notifications.
+        await manager.debugWaitForHashedIdsRefresh();
         manager.createFolder('transfer_source');
         manager.createFolder('transfer_target');
         final items = [_favorite('a'), _favorite('b')];

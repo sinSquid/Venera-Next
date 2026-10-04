@@ -37,6 +37,11 @@ void main() {
       repository.add(original);
       repository.add(comic('1', chapters: const ['new', 'b']));
       repository.add(comic('1', type: 18));
+      // Older versions could persist duplicates when merging downloaded chapters.
+      db.execute(
+        'UPDATE comics SET downloadedChapters = ? WHERE id = ? AND comic_type = ?',
+        ['["new","b","a","b"]', '1', original.comicType.value],
+      );
       repository.removeChapters('1', original.comicType, ['a', 'missing', 'a']);
       expect(repository.find('1', original.comicType)!.downloadedChapters, [
         'new',

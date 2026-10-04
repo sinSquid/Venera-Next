@@ -224,6 +224,8 @@ class WebDavLibrarySynchronizer {
       _onContentChanged();
       final discovered = await WebDavLibraryDiscovery(session).discover(
         rootEntries: rootEntries,
+        // An unreadable subtree is not proof that its cached comics were removed.
+        failOnReadError: hadDirectoryIndex,
         canReuse: (directory) {
           final cached = previous[directory.name];
           return !force &&
@@ -236,6 +238,10 @@ class WebDavLibrarySynchronizer {
         },
       );
       session.check();
+      final discoveredById = <String, WebDavDiscoveredDirectory>{};
+      for (final directory in discovered) {
+        discoveredById.putIfAbsent(directory.id, () => directory);
+      }
       final remoteDirectories = <WebDavLibraryRemoteDirectory>[
         for (var index = 0; index < discovered.length; index++)
           WebDavLibraryRemoteDirectory(
@@ -277,9 +283,7 @@ class WebDavLibrarySynchronizer {
         throttleEvery: 0,
         run: (directory) async {
           try {
-            final discoveredDirectory = discovered.firstWhere(
-              (candidate) => candidate.id == directory.id,
-            );
+            final discoveredDirectory = discoveredById[directory.id]!;
             await _snapshots.load(
               session,
               directory.id,
