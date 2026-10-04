@@ -269,6 +269,8 @@ abstract class MultiPageLoadingState<T extends StatefulWidget, S extends Object>
 
   int? _maxPage;
 
+  RequestScope? _attempt;
+
   Future<Res<List<S>>> loadData(int page);
 
   Widget? buildFrame(BuildContext context, Widget child) => null;
@@ -282,69 +284,99 @@ abstract class MultiPageLoadingState<T extends StatefulWidget, S extends Object>
   bool get haveNextPage => _maxPage == null || _page <= _maxPage!;
 
   void nextPage() {
-    if (_maxPage != null && _page > _maxPage!) return;
-    if (_isLoading) return;
+    if (!mounted || isLoading || data == null || !haveNextPage) return;
     _isLoading = true;
-    loadData(_page).then((value) {
-      _isLoading = false;
-      if (mounted) {
-        if (value.success) {
-          _page++;
-          if (value.subData is int) {
-            _maxPage = value.subData as int;
-          }
-          setState(() {
-            data!.addAll(value.data);
-          });
-        } else {
-          var message = value.errorMessage ?? "Network Error";
-          if (message.length > 20) {
-            message = "${message.substring(0, 20)}...";
-          }
-          context.showMessage(message: message);
-        }
-      }
-    });
+    final scope = _attempt = RequestScope();
+    unawaited(_load(scope, _page, first: false));
   }
 
   void reset() {
+    if (!mounted) return;
     setState(() {
       _isFirstLoading = true;
       _isLoading = false;
       data = null;
       _error = null;
       _page = 1;
+      _maxPage = null;
     });
     firstLoad();
   }
 
+  bool _isCurrent(RequestScope scope) =>
+      mounted && identical(_attempt, scope) && !scope.isCancelled;
+
   void firstLoad() {
-    Future.microtask(() {
-      loadData(_page).then((value) {
-        if (!mounted) return;
-        if (value.success) {
-          _page++;
-          if (value.subData is int) {
-            _maxPage = value.subData as int;
-          }
-          setState(() {
-            _isFirstLoading = false;
-            data = value.data;
-          });
-        } else {
-          setState(() {
-            _isFirstLoading = false;
-            _error = value.errorMessage!;
-          });
-        }
-      });
+    if (!mounted) return;
+    _attempt?.cancel();
+    _attempt?.dispose();
+    final scope = _attempt = RequestScope();
+    scheduleMicrotask(() {
+      if (_isCurrent(scope)) unawaited(_load(scope, 1, first: true));
     });
+  }
+
+  Future<void> _load(
+    RequestScope scope,
+    int page, {
+    required bool first,
+  }) async {
+    try {
+      final result = await scope.run(() => loadData(page));
+      if (!_isCurrent(scope)) return;
+      if (result.success) {
+        setState(() {
+          _page = page + 1;
+          if (result.subData is int) _maxPage = result.subData as int;
+          if (first) {
+            data = List<S>.of(result.data);
+          } else {
+            data!.addAll(result.data);
+          }
+          _isFirstLoading = false;
+          _isLoading = false;
+        });
+      } else {
+        _reportError(result.errorMessage ?? 'Network Error', first: first);
+      }
+    } catch (exception, stack) {
+      if (!_isCurrent(scope)) return;
+      Log.error('Loading', exception, stack);
+      _reportError(exception.toString(), first: first);
+    } finally {
+      scope.dispose();
+      if (identical(_attempt, scope)) _attempt = null;
+    }
+  }
+
+  void _reportError(String message, {required bool first}) {
+    setState(() {
+      _isLoading = false;
+      if (first) {
+        _isFirstLoading = false;
+        _error = message;
+      }
+    });
+    if (!first) {
+      if (message.length > 20) {
+        message = '${message.substring(0, 20)}...';
+      }
+      context.showMessage(message: message);
+    }
+  }
+
+  @override
+  void dispose() {
+    _attempt?.cancel();
+    _attempt?.dispose();
+    _attempt = null;
+    super.dispose();
   }
 
   @override
   void initState() {
-    firstLoad();
     super.initState();
+    firstLoad();
   }
 
   Widget buildLoading(BuildContext context) {

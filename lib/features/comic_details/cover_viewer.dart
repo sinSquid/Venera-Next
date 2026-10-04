@@ -1,6 +1,3 @@
-import 'dart:async';
-import 'dart:ui';
-
 import 'package:flutter/material.dart';
 import 'package:photo_view/photo_view.dart';
 import 'package:venera_next/components/effects.dart';
@@ -9,6 +6,8 @@ import 'package:venera_next/foundation/file_interaction.dart';
 import 'package:venera_next/foundation/file_type.dart';
 import 'package:venera_next/foundation/translations.dart';
 import 'package:venera_next/foundation/widget_utils.dart';
+
+import 'cover_export.dart';
 
 class ComicCoverViewer extends StatefulWidget {
   const ComicCoverViewer({
@@ -123,23 +122,8 @@ class _ComicCoverViewerState extends State<ComicCoverViewer> {
 
   void _saveCover() async {
     try {
-      final imageStream = widget.imageProvider.resolve(
-        const ImageConfiguration(),
-      );
-      final completer = Completer<Uint8List>();
-
-      imageStream.addListener(
-        ImageStreamListener((ImageInfo info, bool _) async {
-          final byteData = await info.image.toByteData(
-            format: ImageByteFormat.png,
-          );
-          if (byteData != null) {
-            completer.complete(byteData.buffer.asUint8List());
-          }
-        }),
-      );
-
-      final data = await completer.future;
+      final data = await readCoverPng(widget.imageProvider);
+      if (!mounted) return;
       final fileType = detectFileType(data);
       await saveFile(
         filename: "cover_${widget.title}${fileType.ext}",

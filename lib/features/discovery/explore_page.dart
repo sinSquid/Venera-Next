@@ -405,9 +405,9 @@ class _MixedExplorePageState
     for (var part in data) {
       if (part is ExplorePagePart) {
         if (cache.isNotEmpty) {
-          yield SliverGridComics(comics: (cache));
+          yield SliverGridComics(comics: cache);
           yield const SliverToBoxAdapter(child: Divider());
-          cache.clear();
+          cache = [];
         }
         yield* _buildExplorePagePart(part, widget.sourceKey);
         yield const SliverToBoxAdapter(child: Divider());
@@ -416,7 +416,7 @@ class _MixedExplorePageState
       }
     }
     if (cache.isNotEmpty) {
-      yield SliverGridComics(comics: (cache));
+      yield SliverGridComics(comics: cache);
     }
   }
 

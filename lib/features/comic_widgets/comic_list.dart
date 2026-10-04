@@ -17,6 +17,7 @@ import 'package:venera_next/foundation/res.dart';
 import 'package:venera_next/foundation/extensions.dart';
 import 'package:venera_next/foundation/translations.dart';
 import 'package:venera_next/foundation/widget_utils.dart';
+import 'package:venera_next/network/request_scope.dart';
 
 import 'comic_tile.dart';
 
@@ -126,6 +127,7 @@ class _SliverGridComicsState extends State<SliverGridComics> {
           comics.add(comic);
         }
       }
+      generateHeroID();
     });
   }
 
@@ -327,14 +329,23 @@ class ComicListState extends State<ComicList> {
 
   String? _nextUrl;
 
+  RequestScope _requests = RequestScope();
+
+  Future<void>? _nextRequest;
+
+  bool _restored = false;
+
   late bool enablePageStorage = widget.enablePageStorage;
 
   Map<String, dynamic> get state => {
     'maxPage': _maxPage,
-    'data': _data,
+    'data': {
+      for (final entry in _data.entries) entry.key: List<Comic>.of(entry.value),
+    },
     'page': _page,
     'error': _error,
-    'loading': _loading,
+    // Pending requests belong to this State and cannot be resumed from storage.
+    'loading': <int, bool>{},
     'nextUrl': _nextUrl,
   };
 
@@ -357,24 +368,22 @@ class ComicListState extends State<ComicList> {
     _page = state['page'];
     _error = state['error'];
     _loading.clear();
-    final loading = state['loading'];
-    if (loading is Map) {
-      for (final entry in loading.entries) {
-        if (entry.key is int && entry.value is bool) {
-          _loading[entry.key] = entry.value;
-        }
-      }
-    }
     _nextUrl = state['nextUrl'];
   }
 
   void storeState() {
-    if (enablePageStorage) {
+    if (mounted && enablePageStorage) {
       PageStorage.of(context).writeState(context, state);
     }
   }
 
   void refresh() {
+    if (!mounted) return;
+    _requests.cancel();
+    _requests.dispose();
+    _requests = RequestScope();
+    _nextRequest = null;
+    _isReloading = false;
     _data.clear();
     _page = 1;
     _maxPage = null;
@@ -386,18 +395,19 @@ class ComicListState extends State<ComicList> {
   }
 
   Future<void> reload() async {
-    if (_isReloading) return;
+    if (!mounted || _isReloading) return;
     if (widget.loadPage == null || _data.isEmpty) {
       refresh();
       return;
     }
     _isReloading = true;
+    final scope = _requests;
     final pages = _data.keys.toList()..sort();
     try {
-      final results = await Future.wait([
-        for (final page in pages) widget.loadPage!(page),
-      ]);
-      if (!mounted) return;
+      final results = await scope.run(
+        () => Future.wait([for (final page in pages) widget.loadPage!(page)]),
+      );
+      if (!_isCurrent(scope)) return;
       setState(() {
         for (var index = 0; index < pages.length; index++) {
           final result = results[index];
@@ -413,20 +423,37 @@ class ComicListState extends State<ComicList> {
         }
       });
       storeState();
+    } catch (error) {
+      if (mounted && _isCurrent(scope)) {
+        context.showMessage(message: error.toString());
+      }
     } finally {
-      _isReloading = false;
+      if (_isCurrent(scope)) _isReloading = false;
     }
   }
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    restoreState(PageStorage.of(context).readState(context));
+    if (!_restored) {
+      _restored = true;
+      restoreState(PageStorage.of(context).readState(context));
+    }
     widget.refreshHandlerCallback?.call(refresh);
     widget.reloadHandlerCallback?.call(() {
       unawaited(reload());
     });
   }
+
+  @override
+  void dispose() {
+    _requests.cancel();
+    _requests.dispose();
+    super.dispose();
+  }
+
+  bool _isCurrent(RequestScope scope) =>
+      mounted && identical(_requests, scope) && !scope.isCancelled;
 
   void remove(Comic c) {
     if (_data[_page] == null || !_data[_page]!.remove(c)) {
@@ -543,17 +570,19 @@ class ComicListState extends State<ComicList> {
     if (widget.loadPage == null && widget.loadNext == null) {
       _error = "loadPage and loadNext can't be null at the same time";
       Future.microtask(() {
-        setState(() {});
+        if (mounted) setState(() {});
       });
+      return;
     }
     if (_data[page] != null || _loading[page] == true) {
       return;
     }
+    final scope = _requests;
     _loading[page] = true;
     try {
       if (widget.loadPage != null) {
-        var res = await widget.loadPage!(page);
-        if (!mounted) return;
+        var res = await scope.run(() => widget.loadPage!(page));
+        if (!_isCurrent(scope)) return;
         if (res.success) {
           if (res.data.isEmpty) {
             setState(() {
@@ -574,29 +603,41 @@ class ComicListState extends State<ComicList> {
           });
         }
       } else {
-        try {
-          while (_data[page] == null) {
-            await _fetchNext();
-          }
-          if (mounted) {
-            setState(() {});
-          }
-        } catch (e) {
-          if (mounted) {
-            setState(() {
-              _error = e.toString();
-            });
-          }
+        while (_isCurrent(scope) &&
+            _data[page] == null &&
+            (_maxPage == null || _data.length < _maxPage!)) {
+          await _fetchNext(scope);
+        }
+        if (_isCurrent(scope)) {
+          setState(() {
+            if (_maxPage != null && _page > _maxPage!) _page = _maxPage!;
+          });
         }
       }
+    } catch (error) {
+      if (_isCurrent(scope)) {
+        setState(() => _error = error.toString());
+      }
     } finally {
-      _loading[page] = false;
-      storeState();
+      if (_isCurrent(scope)) {
+        _loading[page] = false;
+        storeState();
+      }
     }
   }
 
-  Future<void> _fetchNext() async {
-    var res = await widget.loadNext!(_nextUrl);
+  Future<void> _fetchNext(RequestScope scope) {
+    if (_nextRequest != null) return _nextRequest!;
+    late final Future<void> pending;
+    pending = _loadNext(scope).whenComplete(() {
+      if (identical(_nextRequest, pending)) _nextRequest = null;
+    });
+    return _nextRequest = pending;
+  }
+
+  Future<void> _loadNext(RequestScope scope) async {
+    var res = await scope.run(() => widget.loadNext!(_nextUrl));
+    if (!_isCurrent(scope)) return;
     _data[_data.length + 1] = List<Comic>.from(res.data);
     if (res.subData == null) {
       _maxPage = _data.length;

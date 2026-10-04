@@ -110,7 +110,7 @@ class _SearchResultPageState extends State<SearchResultPage> {
     sourceKey = widget.sourceKey;
     text = _applyConfiguredLanguageFilter(widget.text);
     controller = SearchBarController(currentText: text, onSearch: search);
-    options = widget.options ?? const [];
+    options = List<String>.of(widget.options ?? const []);
     validateOptions();
     appdata.addSearchHistory(text);
     suggestionsController = _SuggestionsController(controller, sourceKey);
@@ -174,8 +174,15 @@ class _SearchResultPageState extends State<SearchResultPage> {
               return _SearchSettingsDialog(state: this);
             },
           );
+          if (!mounted) return;
           if (!previousOptions.isEqualTo(options) ||
               previousSourceKey != sourceKey) {
+            if (previousSourceKey != sourceKey) {
+              suggestionsController = _SuggestionsController(
+                controller,
+                sourceKey,
+              );
+            }
             text = _applyConfiguredLanguageFilter(controller.text);
             controller.currentText = text;
             setState(() {});
@@ -271,6 +278,12 @@ class _SuggestionsState extends State<_Suggestions> {
   void initState() {
     widget.controller._state = this;
     super.initState();
+  }
+
+  @override
+  void dispose() {
+    widget.controller._state = null;
+    super.dispose();
   }
 
   @override
@@ -412,7 +425,7 @@ class _SearchSettingsDialogState extends State<_SearchSettingsDialog> {
   @override
   void initState() {
     searchTarget = widget.state.sourceKey;
-    options = widget.state.options;
+    options = List<String>.of(widget.state.options);
     super.initState();
   }
 
@@ -426,7 +439,7 @@ class _SearchSettingsDialogState extends State<_SearchSettingsDialog> {
     var sources = ComicSource.all();
     var enabled = appdata.settings['searchSources'] as List;
     sources.removeWhere((e) {
-      return !enabled.contains(e.key);
+      return !enabled.contains(e.key) || e.searchPageData == null;
     });
     return ContentDialog(
       title: "Settings".tl,
@@ -446,7 +459,6 @@ class _SearchSettingsDialogState extends State<_SearchSettingsDialog> {
                 onTap: () {
                   setState(() {
                     searchTarget = e.key;
-                    options.clear();
                     final searchOptions =
                         ComicSource.find(
                           searchTarget,
@@ -493,6 +505,7 @@ class _SearchSettingsDialogState extends State<_SearchSettingsDialog> {
           onChanged: (value) {
             setState(() {
               options[i] = value;
+              onChanged();
             });
           },
           sourceKey: searchTarget,

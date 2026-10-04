@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:shimmer_animation/shimmer_animation.dart';
 import 'package:venera_next/components/appbar.dart';
+import 'package:venera_next/components/loading.dart';
 import 'package:venera_next/features/comic_source/comic_source.dart';
 import 'package:venera_next/features/favorites/favorites.dart';
 import 'package:venera_next/foundation/app.dart';
@@ -12,6 +13,7 @@ import 'package:venera_next/foundation/context.dart';
 import 'package:venera_next/foundation/translations.dart';
 import 'package:venera_next/foundation/widget_utils.dart';
 import 'package:venera_next/network/cache.dart';
+import 'package:venera_next/network/request_scope.dart';
 
 class ComicFavoritePanel extends StatefulWidget {
   const ComicFavoritePanel({
@@ -186,6 +188,8 @@ class _NetworkSectionState extends State<_NetworkSection> {
   bool? localIsFavorite;
   final Map<String, bool> _itemLoading = {};
   late List<double> _skeletonWidths;
+  RequestScope? _foldersRequest;
+  String? _foldersError;
 
   @override
   void initState() {
@@ -202,14 +206,23 @@ class _NetworkSectionState extends State<_NetworkSection> {
     }
   }
 
-  void loadFolders() async {
-    var res = await widget.comicSource.favoriteData!.loadFolders!(widget.cid);
-    if (res.error) {
-      context.showMessage(message: res.errorMessage!);
-      setState(() {
-        isLoadingFolders = false;
-      });
-    } else {
+  Future<void> loadFolders() async {
+    if (!mounted || _foldersRequest != null) return;
+    final request = RequestScope();
+    _foldersRequest = request;
+    setState(() {
+      isLoadingFolders = true;
+      _foldersError = null;
+    });
+    try {
+      final res = await request.run(
+        () => widget.comicSource.favoriteData!.loadFolders!(widget.cid),
+      );
+      if (!mounted) return;
+      if (res.error) {
+        _foldersError = res.errorMessage ?? 'Error';
+        return;
+      }
       folders = res.data;
       if (res.subData is List) {
         final list = List<String>.from(res.subData);
@@ -224,10 +237,21 @@ class _NetworkSectionState extends State<_NetworkSection> {
         addedFolders.clear();
         localIsFavorite = false;
       }
-      setState(() {
-        isLoadingFolders = false;
-      });
+    } catch (error) {
+      if (mounted && !request.isCancelled) {
+        _foldersError = error.toString();
+      }
+    } finally {
+      request.dispose();
+      _foldersRequest = null;
+      if (mounted) setState(() => isLoadingFolders = false);
     }
+  }
+
+  @override
+  void dispose() {
+    _foldersRequest?.cancel();
+    super.dispose();
   }
 
   Widget _buildLoadingSkeleton() {
@@ -283,6 +307,16 @@ class _NetworkSectionState extends State<_NetworkSection> {
   Widget build(BuildContext context) {
     if (isLoadingFolders) {
       return _buildLoadingSkeleton();
+    }
+    if (_foldersError != null) {
+      return Padding(
+        padding: const EdgeInsets.all(16),
+        child: NetworkError(
+          message: _foldersError!,
+          retry: loadFolders,
+          withAppbar: false,
+        ),
+      );
     }
 
     bool isMultiFolder = widget.comicSource.favoriteData!.loadFolders != null;

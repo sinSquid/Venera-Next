@@ -2,6 +2,7 @@ import 'package:venera_next/features/reader/orientation.dart'
     show ReaderOrientationScope;
 import 'dart:convert';
 import 'dart:io';
+import 'dart:ui' show PointerDeviceKind;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -15,6 +16,7 @@ import 'package:venera_next/features/history/history.dart';
 import 'package:venera_next/features/local_comics/local_comics.dart';
 import 'package:venera_next/features/reader/auto_reading.dart';
 import 'package:venera_next/features/reader/continuous_view.dart';
+import 'package:venera_next/features/reader/gesture.dart';
 import 'package:venera_next/features/reader/reader_page.dart';
 import 'package:venera_next/foundation/app.dart';
 import 'package:venera_next/foundation/appdata.dart';
@@ -217,6 +219,21 @@ void main() {
           }
           expect(reader.chapter, 2);
           expect(reader.autoReading.status, AutoReadingStatus.stopped);
+          expect(tester.takeException(), isNull);
+          settings['enableDoubleTapToZoom'] = true;
+          final gestures = tester.state<ReaderGestureDetectorState>(
+            find.byType(ReaderGestureDetector),
+          );
+          gestures.onTapUp(
+            TapUpDetails(
+              kind: PointerDeviceKind.touch,
+              globalPosition: const Offset(400, 250),
+              localPosition: const Offset(400, 250),
+            ),
+          );
+          // Leaving during the double-tap window must discard the single tap.
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pump(const Duration(milliseconds: 300));
           expect(tester.takeException(), isNull);
         } finally {
           key.currentState?.autoReading.stop();

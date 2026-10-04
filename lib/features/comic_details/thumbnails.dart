@@ -9,6 +9,7 @@ import 'package:venera_next/foundation/consts.dart';
 import 'package:venera_next/foundation/context.dart';
 import 'package:venera_next/foundation/image_provider/cached_image.dart';
 import 'package:venera_next/foundation/translations.dart';
+import 'package:venera_next/network/request_scope.dart';
 
 class ComicThumbnails extends StatefulWidget {
   const ComicThumbnails({
@@ -41,6 +42,8 @@ class _ComicThumbnailsState extends State<ComicThumbnails> {
 
   bool isLoading = false;
 
+  final _request = RequestScope();
+
   @override
   void initState() {
     super.initState();
@@ -54,25 +57,37 @@ class _ComicThumbnailsState extends State<ComicThumbnails> {
     if (!isInitialLoading && next == null) {
       return;
     }
-    if (isLoading) return;
+    if (!mounted || isLoading) return;
+    isLoading = true;
+    error = null;
     Future.microtask(() {
-      setState(() {
-        isLoading = true;
-      });
+      if (mounted) setState(() {});
     });
-    var res = await loadComicThumbnail(widget.comicId, next);
-    if (res.success) {
-      thumbnails.addAll(res.data);
-      next = res.subData;
-      isInitialLoading = false;
-    } else {
-      error = res.errorMessage;
+    try {
+      final res = await _request.run(
+        () => loadComicThumbnail(widget.comicId, next),
+      );
+      if (!mounted) return;
+      if (res.success) {
+        thumbnails.addAll(res.data);
+        next = res.subData;
+        isInitialLoading = false;
+      } else {
+        error = res.errorMessage;
+      }
+    } catch (exception) {
+      if (!mounted || _request.isCancelled) return;
+      error = exception.toString();
+    } finally {
+      if (mounted) setState(() => isLoading = false);
     }
-    if (mounted) {
-      setState(() {
-        isLoading = false;
-      });
-    }
+  }
+
+  @override
+  void dispose() {
+    _request.cancel();
+    _request.dispose();
+    super.dispose();
   }
 
   @override

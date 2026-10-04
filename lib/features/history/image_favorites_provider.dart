@@ -53,13 +53,16 @@ class ImageFavoritesProvider
     try {
       image = await getImageFromNetwork(imageKey, chunkEvents, checkStop);
     } catch (e) {
+      checkStop?.call();
       if (gotImageKey) {
         rethrow;
       } else {
         imageKey = await getImageKey();
+        checkStop?.call();
         image = await getImageFromNetwork(imageKey, chunkEvents, checkStop);
       }
     }
+    checkStop?.call();
     await writeToCache(image);
     return image;
   }
@@ -101,24 +104,26 @@ class ImageFavoritesProvider
   }
 
   Future<Uint8List?> getImageFromLocal() async {
-    var localComic = LocalManager().find(
-      sourceKey,
-      ComicType.fromKey(sourceKey),
-    );
+    var localComic = LocalManager().find(cid, ComicType.fromKey(sourceKey));
     if (localComic == null) {
       return null;
     }
-    var epIndex = localComic.chapters?.ids.toList().indexOf(eid) ?? -1;
-    if (epIndex == -1 && localComic.hasChapters) {
+    if (localComic.hasChapters && !localComic.chapters!.ids.contains(eid)) {
       return null;
     }
-    var images = await LocalManager().getImages(
-      sourceKey,
-      ComicType.fromKey(sourceKey),
-      epIndex,
-    );
-    var data = await File(images[page]).readAsBytes();
-    return data;
+    try {
+      final images = await LocalManager().getImages(
+        cid,
+        ComicType.fromKey(sourceKey),
+        eid,
+      );
+      if (page < 1 || page > images.length) return null;
+      final image = images[page - 1];
+      return await File(image.substring('file://'.length)).readAsBytes();
+    } on FileSystemException {
+      // A missing/partial download may still be available in cache or online.
+      return null;
+    }
   }
 
   Future<Uint8List> getImageFromNetwork(
@@ -168,5 +173,6 @@ class ImageFavoritesProvider
 
   @override
   String get key =>
-      "ImageFavorites ${imageFavorite.imageKey}@${imageFavorite.sourceKey}@${imageFavorite.id}@${imageFavorite.eid}";
+      "ImageFavorites ${imageFavorite.imageKey}@${imageFavorite.sourceKey}@${imageFavorite.id}@${imageFavorite.eid}"
+      "${imageFavorite.imageKey.isEmpty ? '@page:$page' : ''}";
 }

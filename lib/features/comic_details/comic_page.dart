@@ -1,6 +1,5 @@
 import 'package:venera_next/network/request_scope.dart';
 import 'dart:async';
-import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shimmer_animation/shimmer_animation.dart';
@@ -18,6 +17,7 @@ import 'package:venera_next/features/comic_details/actions.dart';
 import 'package:venera_next/features/comic_details/chapters.dart';
 import 'package:venera_next/features/comic_details/comments_preview.dart';
 import 'package:venera_next/features/comic_details/cover_viewer.dart';
+import 'package:venera_next/features/comic_details/cover_export.dart';
 import 'package:venera_next/features/comic_details/thumbnails.dart';
 import 'package:venera_next/foundation/app.dart';
 import 'package:venera_next/features/comic_source/comic_source.dart';
@@ -844,21 +844,8 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
         cid: comic.id,
       );
 
-      final imageStream = imageProvider.resolve(const ImageConfiguration());
-      final completer = Completer<Uint8List>();
-
-      imageStream.addListener(
-        ImageStreamListener((ImageInfo info, bool _) async {
-          final byteData = await info.image.toByteData(
-            format: ImageByteFormat.png,
-          );
-          if (byteData != null) {
-            completer.complete(byteData.buffer.asUint8List());
-          }
-        }),
-      );
-
-      final data = await completer.future;
+      final data = await readCoverPng(imageProvider);
+      if (!context.mounted) return;
       final fileType = detectFileType(data);
       await saveFile(filename: "cover${fileType.ext}", data: data);
     } catch (e) {

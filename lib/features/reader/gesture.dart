@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -23,6 +25,8 @@ class ReaderGestureDetector extends StatefulWidget {
 class ReaderGestureDetectorState
     extends AutomaticGlobalState<ReaderGestureDetector> {
   late TapGestureRecognizer _tapGestureRecognizer;
+
+  Timer? _pendingTap;
 
   static const _kDoubleTapMaxTime = Duration(milliseconds: 200);
 
@@ -61,11 +65,20 @@ class ReaderGestureDetectorState
   }
 
   @override
+  void dispose() {
+    _pendingTap?.cancel();
+    _previousEvent = null;
+    _tapGestureRecognizer.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     return Listener(
       behavior: HitTestBehavior.translucent,
       onPointerDown: (event) {
         if (event.position == Offset.zero) {
+          _pendingTap?.cancel();
           _previousEvent = null;
           return;
         }
@@ -183,6 +196,7 @@ class ReaderGestureDetectorState
   void onTapUp(TapUpDetails event) {
     if (event.globalPosition == Offset.zero &&
         event.localPosition == Offset.zero) {
+      _pendingTap?.cancel();
       _previousEvent = null;
       return;
     }
@@ -192,6 +206,8 @@ class ReaderGestureDetectorState
     }
     final location = event.globalPosition;
     if (!_enableDoubleTapToZoom) {
+      _pendingTap?.cancel();
+      _previousEvent = null;
       onTap(location);
       return;
     }
@@ -199,18 +215,21 @@ class ReaderGestureDetectorState
     if (previousLocation != null) {
       if ((location - previousLocation).distanceSquared <
           _kDoubleTapMaxDistanceSquared) {
-        onDoubleTap(location);
+        _pendingTap?.cancel();
         _previousEvent = null;
+        onDoubleTap(location);
         return;
       } else {
         onTap(previousLocation);
       }
     }
     _previousEvent = event;
-    Future.delayed(_kDoubleTapMaxTime, () {
-      if (_previousEvent == event) {
-        onTap(location);
+    _pendingTap?.cancel();
+    _pendingTap = Timer(_kDoubleTapMaxTime, () {
+      _pendingTap = null;
+      if (mounted && _previousEvent == event) {
         _previousEvent = null;
+        onTap(location);
       }
     });
   }

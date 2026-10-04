@@ -6,9 +6,11 @@ import "package:venera_next/components/scroll.dart";
 import "package:venera_next/features/comic_widgets/comic_widgets.dart";
 import "package:venera_next/foundation/appdata.dart";
 import "package:venera_next/foundation/context.dart";
+import "package:venera_next/foundation/res.dart";
 import "package:venera_next/features/comic_source/comic_source.dart";
 import "package:venera_next/foundation/translations.dart";
 import "package:venera_next/foundation/widget_utils.dart";
+import "package:venera_next/network/request_scope.dart";
 
 import "search_result_page.dart";
 
@@ -96,7 +98,7 @@ class _SliverSearchResultState extends State<_SliverSearchResult>
 
   static const _kComicHeight = 162.0;
 
-  get _comicWidth => _kComicHeight * 0.7;
+  double get _comicWidth => _kComicHeight * 0.7;
 
   static const _kLeftPadding = 16.0;
 
@@ -104,37 +106,40 @@ class _SliverSearchResultState extends State<_SliverSearchResult>
 
   String? error;
 
+  final _request = RequestScope();
+
   void load() async {
     final data = widget.source.searchPageData!;
-    var options = (data.searchOptions ?? [])
+    final options = (data.searchOptions ?? [])
         .map((e) => e.defaultValue)
         .toList();
-    if (data.loadPage != null) {
-      var res = await data.loadPage!(widget.keyword, 1, options);
-      if (!res.error) {
-        setState(() {
-          comics = res.data;
-          isLoading = false;
-        });
-      } else {
-        setState(() {
+    try {
+      final res = await _request.run<Res<List<Comic>>>(() {
+        if (data.loadPage != null) {
+          return data.loadPage!(widget.keyword, 1, options);
+        }
+        if (data.loadNext != null) {
+          return data.loadNext!(widget.keyword, null, options);
+        }
+        return const Res<List<Comic>>([]);
+      });
+      if (!mounted) return;
+      setState(() {
+        if (res.error) {
           error = res.errorMessage ?? "Unknown error".tl;
-          isLoading = false;
-        });
-      }
-    } else if (data.loadNext != null) {
-      var res = await data.loadNext!(widget.keyword, null, options);
-      if (!res.error) {
-        setState(() {
+        } else {
           comics = res.data;
-          isLoading = false;
-        });
-      } else {
-        setState(() {
-          error = res.errorMessage ?? "Unknown error".tl;
-          isLoading = false;
-        });
-      }
+        }
+        isLoading = false;
+      });
+    } catch (exception) {
+      if (!mounted || _request.isCancelled) return;
+      setState(() {
+        error = exception.toString();
+        isLoading = false;
+      });
+    } finally {
+      _request.dispose();
     }
   }
 
@@ -142,6 +147,13 @@ class _SliverSearchResultState extends State<_SliverSearchResult>
   void initState() {
     super.initState();
     load();
+  }
+
+  @override
+  void dispose() {
+    _request.cancel();
+    _request.dispose();
+    super.dispose();
   }
 
   Widget buildPlaceHolder() {
@@ -237,9 +249,10 @@ class _SliverSearchResultState extends State<_SliverSearchResult>
           else
             SizedBox(
               height: _kComicHeight,
-              child: ListView(
+              child: ListView.builder(
                 scrollDirection: Axis.horizontal,
-                children: [for (var c in comics!) buildComic(c)],
+                itemCount: comics!.length,
+                itemBuilder: (context, index) => buildComic(comics![index]),
               ),
             ),
         ],

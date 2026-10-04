@@ -31,7 +31,6 @@ import 'package:venera_next/features/reader/settings_effects.dart';
 import 'package:venera_next/features/reader/image_selection.dart';
 import 'package:venera_next/foundation/log.dart';
 import 'package:venera_next/foundation/translations.dart';
-import 'package:venera_next/foundation/widget_utils.dart';
 import 'package:venera_next/routing/settings.dart';
 
 class ReaderScaffold extends StatefulWidget {
