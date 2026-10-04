@@ -68,6 +68,10 @@ class CacheManager {
         type TEXT
       )
     ''');
+    // Cleanup repeatedly selects the oldest entries and rechecks file ownership.
+    // Both paths otherwise scan the whole table for every small deletion batch.
+    _db.execute('CREATE INDEX IF NOT EXISTS cache_expires ON cache (expires)');
+    _db.execute('CREATE INDEX IF NOT EXISTS cache_file ON cache (dir, name)');
   }
 
   Future<void> _runInitialScan() async {
@@ -107,7 +111,8 @@ class CacheManager {
     List<int> data, [
     int duration = 7 * 24 * 60 * 60 * 1000,
   ]) {
-    final bytes = List<int>.of(data);
+    // Preserve the caller's snapshot without expanding image bytes into int slots.
+    final bytes = Uint8List.fromList(data);
     return _enqueue(() => _writeCache(key, bytes, duration));
   }
 

@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:sqlite3/sqlite3.dart';
 import 'package:venera_next/foundation/cache_manager.dart';
 import 'package:venera_next/foundation/cache_scan.dart';
 
@@ -22,6 +24,89 @@ import 'package:venera_next/foundation/cache_scan.dart';
 }
 
 void main() {
+  test('queued image writes retain independent byte snapshots', () async {
+    final gate = Completer<CacheScanResult>();
+    final f = fixture(scanner: (_, _) => gate.future);
+    final scanning = f.manager.start();
+    final image = Uint8List.fromList([0, 1, 127, 128, 255]);
+    final write = f.manager.writeCache('image', image);
+    image.fillRange(0, image.length, 42);
+    gate.complete(const CacheScanResult(0, []));
+    await Future.wait([scanning, write]);
+
+    expect(await (await f.manager.findCache('image'))!.readAsBytes(), [
+      0,
+      1,
+      127,
+      128,
+      255,
+    ]);
+    expect(f.manager.currentSize, 5);
+  });
+
+  test('legacy caches use indexed cleanup and retain the newest data', () async {
+    final root = Directory.systemTemp.createTempSync('venera-legacy-cache-');
+    final db = sqlite3.open('${root.path}/cache.db');
+    db.execute('''
+      CREATE TABLE cache (
+        key TEXT PRIMARY KEY NOT NULL,
+        dir TEXT NOT NULL,
+        name TEXT NOT NULL,
+        expires INTEGER NOT NULL,
+        type TEXT
+      )
+    ''');
+    final expires = DateTime.now().millisecondsSinceEpoch + 86400000;
+    for (var i = 0; i < 3; i++) {
+      final file = File('${root.path}/cache/0/image$i');
+      file.createSync(recursive: true);
+      file.writeAsBytesSync(Uint8List(600 * 1024));
+      db.execute('INSERT INTO cache VALUES (?, ?, ?, ?, NULL)', [
+        'image$i',
+        '0',
+        'image$i',
+        expires + i,
+      ]);
+    }
+    db.dispose();
+    final manager = CacheManager.open(
+      dataPath: root.path,
+      cacheRoot: root.path,
+    );
+    final inspector = sqlite3.open('${root.path}/cache.db');
+    addTearDown(() async {
+      await manager.dispose();
+      inspector.dispose();
+      await root.delete(recursive: true);
+    });
+
+    // Guard the query cost on large existing caches without timing assertions.
+    final oldestPlan = inspector
+        .select(
+          'EXPLAIN QUERY PLAN SELECT * FROM cache ORDER BY expires ASC LIMIT 10',
+        )
+        .map((row) => row['detail'])
+        .join(' ');
+    final ownershipPlan = inspector
+        .select(
+          'EXPLAIN QUERY PLAN SELECT key FROM cache WHERE dir = ? AND name = ?',
+          ['0', 'image0'],
+        )
+        .map((row) => row['detail'])
+        .join(' ');
+    expect(oldestPlan, isNot(contains('USE TEMP B-TREE')));
+    expect(ownershipPlan, contains(RegExp(r'USING (COVERING )?INDEX')));
+
+    await manager.start();
+    expect(manager.currentSize, 1800 * 1024);
+    manager.setLimitSize(1);
+    await manager.checkCache();
+    expect(await manager.findCache('image0'), isNull);
+    expect(await manager.findCache('image1'), isNull);
+    expect(await manager.findCache('image2'), isNotNull);
+    expect(manager.currentSize, 600 * 1024);
+  });
+
   test('construction does not scan and start shares one scan', () async {
     var scans = 0;
     final gate = Completer<CacheScanResult>();
