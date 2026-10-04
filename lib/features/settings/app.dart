@@ -36,6 +36,41 @@ class AppSettings extends StatefulWidget {
 }
 
 class _AppSettingsState extends State<AppSettings> {
+  bool _busy = false;
+  int _authCheck = 0;
+
+  Future<void> _validateAuthentication() async {
+    final attempt = ++_authCheck;
+    if (!appdata.settings['authorizationRequired']) return;
+    var supported = false;
+    String? errorMessage;
+    try {
+      final auth = LocalAuthentication();
+      supported =
+          await auth.canCheckBiometrics || await auth.isDeviceSupported();
+    } catch (error, stack) {
+      Log.error('Authentication settings', error, stack);
+      errorMessage = error.toString();
+    }
+    if (attempt != _authCheck ||
+        !appdata.settings['authorizationRequired'] ||
+        supported) {
+      return;
+    }
+    appdata.settings['authorizationRequired'] = false;
+    if (mounted) {
+      setState(() {});
+      context.showMessage(
+        message: errorMessage ?? "Biometrics not supported".tl,
+      );
+    }
+    try {
+      await appdata.saveData();
+    } catch (error, stack) {
+      Log.error('Authentication settings', error, stack);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return SmoothCustomScrollView(
@@ -57,28 +92,41 @@ class _AppSettingsState extends State<AppSettings> {
           title: "Set New Storage Path".tl,
           actionTitle: "Set".tl,
           callback: () async {
-            String? result;
-            if (App.isAndroid) {
-              var picker = DirectoryPicker();
-              result = (await picker.pickDirectory())?.path;
-            } else if (App.isIOS) {
-              result = await selectDirectoryIOS();
-            } else {
-              result = await selectDirectory();
-            }
-            if (result == null) return;
-            var loadingDialog = showLoadingDialog(
-              App.rootContext,
-              barrierDismissible: false,
-              allowCancel: false,
-            );
-            var res = await LocalManager().setNewPath(result);
-            loadingDialog.close();
-            if (res != null) {
-              context.showMessage(message: res);
-            } else {
-              context.showMessage(message: "Path set successfully".tl);
-              setState(() {});
+            if (_busy) return;
+            _busy = true;
+            LoadingDialogController? loadingDialog;
+            try {
+              String? result;
+              if (App.isAndroid) {
+                var picker = DirectoryPicker();
+                result = (await picker.pickDirectory())?.path;
+              } else if (App.isIOS) {
+                result = await selectDirectoryIOS();
+              } else {
+                result = await selectDirectory();
+              }
+              if (result == null || !context.mounted) return;
+              loadingDialog = showLoadingDialog(
+                context,
+                barrierDismissible: false,
+                allowCancel: false,
+              );
+              var res = await LocalManager().setNewPath(result);
+              if (!context.mounted) return;
+              if (res != null) {
+                context.showMessage(message: res);
+              } else {
+                context.showMessage(message: "Path set successfully".tl);
+                setState(() {});
+              }
+            } catch (error, stack) {
+              Log.error('Storage path', error, stack);
+              if (context.mounted) {
+                context.showMessage(message: error.toString());
+              }
+            } finally {
+              loadingDialog?.close();
+              _busy = false;
             }
           },
         ).toSliver(),
@@ -90,15 +138,27 @@ class _AppSettingsState extends State<AppSettings> {
           title: "Clear Cache".tl,
           actionTitle: "Clear".tl,
           callback: () async {
+            if (_busy) return;
+            _busy = true;
             var loadingDialog = showLoadingDialog(
-              App.rootContext,
+              context,
               barrierDismissible: false,
               allowCancel: false,
             );
-            await CacheManager().clear();
-            loadingDialog.close();
-            context.showMessage(message: "Cache cleared".tl);
-            setState(() {});
+            try {
+              await CacheManager().clear();
+              if (!context.mounted) return;
+              context.showMessage(message: "Cache cleared".tl);
+              setState(() {});
+            } catch (error, stack) {
+              Log.error('Clear cache', error, stack);
+              if (context.mounted) {
+                context.showMessage(message: error.toString());
+              }
+            } finally {
+              loadingDialog.close();
+              _busy = false;
+            }
           },
         ).toSliver(),
         CallbackSetting(
@@ -136,41 +196,69 @@ class _AppSettingsState extends State<AppSettings> {
         CallbackSetting(
           title: "Export App Data".tl,
           callback: () async {
+            if (_busy) return;
+            _busy = true;
             var controller = showLoadingDialog(context);
-            var file = await exportAppData(false);
-            await saveFile(filename: "data.venera", file: file);
-            controller.close();
+            File? file;
+            try {
+              file = await exportAppData(false);
+              if (!mounted || controller.closed) return;
+              await saveFile(filename: "data.venera", file: file);
+            } catch (error, stack) {
+              Log.error('Export data', error, stack);
+              if (context.mounted) {
+                context.showMessage(message: error.toString());
+              }
+            } finally {
+              await file?.deleteIgnoreError();
+              controller.close();
+              _busy = false;
+            }
           },
           actionTitle: 'Export'.tl,
         ).toSliver(),
         CallbackSetting(
           title: "Import App Data".tl,
           callback: () async {
+            if (_busy) return;
+            _busy = true;
             var controller = showLoadingDialog(context);
-            var file = await selectFile(ext: ['venera', 'picadata']);
-            if (file != null) {
-              var cacheFile = File(
-                FilePath.join(
-                  App.cachePath,
-                  "import_data_${const Uuid().v4()}",
-                ),
-              );
-              try {
+            File? cacheFile;
+            try {
+              var file = await selectFile(ext: ['venera', 'picadata']);
+              if (file != null && mounted && !controller.closed) {
+                cacheFile = File(
+                  FilePath.join(
+                    App.cachePath,
+                    "import_data_${const Uuid().v4()}",
+                  ),
+                );
                 await file.saveTo(cacheFile.path);
+                if (!context.mounted || controller.closed) return;
+                // Once import begins, its transaction must commit or roll back.
+                controller.close();
+                controller = showLoadingDialog(
+                  context,
+                  barrierDismissible: false,
+                  allowCancel: false,
+                );
                 if (file.name.endsWith('picadata')) {
                   await importPicaData(cacheFile);
                 } else {
                   await importAppData(cacheFile);
                 }
-              } catch (e, s) {
-                Log.error("Import data", e.toString(), s);
-                context.showMessage(message: "Failed to import data".tl);
-              } finally {
-                cacheFile.deleteIgnoreError();
-                App.forceRebuild();
               }
+            } catch (e, s) {
+              Log.error("Import data", e.toString(), s);
+              if (context.mounted) {
+                context.showMessage(message: "Failed to import data".tl);
+              }
+            } finally {
+              await cacheFile?.deleteIgnoreError();
+              controller.close();
+              _busy = false;
+              if (mounted && cacheFile != null) App.forceRebuild();
             }
-            controller.close();
           },
           actionTitle: 'Import'.tl,
         ).toSliver(),
@@ -220,25 +308,7 @@ class _AppSettingsState extends State<AppSettings> {
           SwitchSetting(
             title: "Authorization Required".tl,
             settingKey: "authorizationRequired",
-            onChanged: () async {
-              var current = appdata.settings['authorizationRequired'];
-              if (current) {
-                final auth = LocalAuthentication();
-                final bool canAuthenticateWithBiometrics =
-                    await auth.canCheckBiometrics;
-                final bool canAuthenticate =
-                    canAuthenticateWithBiometrics ||
-                    await auth.isDeviceSupported();
-                if (!canAuthenticate) {
-                  context.showMessage(message: "Biometrics not supported".tl);
-                  setState(() {
-                    appdata.settings['authorizationRequired'] = false;
-                  });
-                  appdata.saveData();
-                  return;
-                }
-              }
-            },
+            onChanged: _validateAuthentication,
           ).toSliver(),
       ],
     );
