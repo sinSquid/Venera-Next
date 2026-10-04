@@ -53,6 +53,59 @@ void main() {
     },
   );
 
+  test('every coalesced caller waits for the pending save', () async {
+    final dataDir = Directory.systemTemp.createTempSync('venera-source-save-');
+    final previousPath = App.dataPath;
+    App.dataPath = dataDir.path;
+    addTearDown(() {
+      App.dataPath = previousPath;
+      dataDir.deleteSync(recursive: true);
+    });
+
+    final source = _source();
+    source.data = {'token': 'first'};
+    final firstSave = source.saveData();
+    final secondSave = source.saveData();
+    var pendingCompleted = false;
+    final pendingCompletion = secondSave.then((_) => pendingCompleted = true);
+    source.data = {'token': 'latest'};
+    final thirdSave = source.saveData();
+
+    try {
+      await thirdSave;
+      expect(pendingCompleted, isTrue);
+      expect(
+        jsonDecode(
+          File('${dataDir.path}/comic_source/test.data').readAsStringSync(),
+        ),
+        {'token': 'latest'},
+      );
+    } finally {
+      await Future.wait([firstSave, secondSave, pendingCompletion]);
+    }
+  });
+
+  test('every coalesced caller receives the pending disk error', () async {
+    final dataDir = Directory.systemTemp.createTempSync('venera-source-save-');
+    final previousPath = App.dataPath;
+    App.dataPath = dataDir.path;
+    addTearDown(() {
+      App.dataPath = previousPath;
+      dataDir.deleteSync(recursive: true);
+    });
+    File('${dataDir.path}/comic_source').writeAsStringSync('blocks directory');
+
+    final source = _source();
+    final firstSave = source.saveData();
+    final secondSave = source.saveData();
+    final thirdSave = source.saveData();
+
+    await Future.wait([
+      for (final save in [firstSave, secondSave, thirdSave])
+        expectLater(save, throwsA(isA<FileSystemException>())),
+    ]);
+  });
+
   test('comic type resolves source data through comic source bridge', () {
     const key = 'comic_type_bridge_test_source';
     final manager = ComicSourceManager();

@@ -193,7 +193,7 @@ class ComicSource {
 
   Future<void> _schedulePendingSave() {
     if (_pendingSave != null) {
-      return Future.value();
+      return _pendingSave!;
     }
     var activeSave = _activeSave!;
     var pendingSave = activeSave.then(
