@@ -635,6 +635,69 @@ void main() {
   );
 
   test(
+    'large batch deletion preserves only shared identities across reference-count chunks',
+    () async {
+      await _withFavoritesManager((manager) async {
+        await manager.debugWaitForHashedIdsRefresh();
+        final items = [
+          for (var index = 0; index < 405; index++)
+            _favorite('bulk-$index')..type = const ComicType(17),
+          _favorite('bulk-400')..type = const ComicType(18),
+        ];
+        final shared = [items[0], items[399], items[400], items[404]];
+        for (final (folder, comics) in [
+          ('delete_bulk', items),
+          ('keep_shared', shared),
+        ]) {
+          manager.fromJson(
+            jsonEncode({
+              'name': folder,
+              'comics': comics.map((comic) => comic.toJson()).toList(),
+            }),
+          );
+        }
+        final directory = Directory('${App.dataPath}/favorite_cover')
+          ..createSync();
+        final covers = <FavoriteItem, File>{
+          for (final item in [...shared, items[398], items[401], items.last])
+            item: File(
+              '${directory.path}/${(item.id + item.type.value.toString()).hashCode}',
+            )..writeAsStringSync('cover ${item.id}/${item.type.value}'),
+        };
+        var notifications = 0;
+        void listener() {
+          notifications++;
+          expect(manager.folderComics('delete_bulk'), 0);
+          expect(manager.folderComics('keep_shared'), shared.length);
+          for (final item in items) {
+            expect(manager.isExist(item.id, item.type), shared.contains(item));
+          }
+        }
+
+        manager.addListener(listener);
+        try {
+          // The deletion must also win over any older index snapshot.
+          manager.refreshHashedIds();
+          manager.batchDeleteComics('delete_bulk', [
+            ...items,
+            items.first,
+            _favorite('missing'),
+          ]);
+          expect(notifications, 1);
+          await manager.debugWaitForHashedIdsRefresh();
+          expect(manager.totalComics, shared.length);
+          for (final entry in covers.entries) {
+            expect(entry.value.existsSync(), shared.contains(entry.key));
+          }
+        } finally {
+          manager.removeListener(listener);
+        }
+      });
+    },
+    skip: _sqliteAvailable() ? false : 'sqlite3 native library is unavailable',
+  );
+
+  test(
     'failed and same-folder transfers do not notify or change cached counts',
     () async {
       await _withFavoritesManager((manager) async {

@@ -16,6 +16,24 @@ class FailingRepository extends FavoritesRepository {
   }
 }
 
+class CountingOrderRepository extends FavoritesRepository {
+  CountingOrderRepository(super.db);
+
+  var orderScans = 0;
+
+  @override
+  int maxValue(String folder) {
+    orderScans++;
+    return super.maxValue(folder);
+  }
+
+  @override
+  int minValue(String folder) {
+    orderScans++;
+    return super.minValue(folder);
+  }
+}
+
 void main() {
   late Database db;
   late FavoritesRepository repository;
@@ -118,4 +136,45 @@ void main() {
       expect(repository.count(empty), 0);
     },
   );
+
+  for (final append in [true, false]) {
+    test(
+      'large ${append ? "append" : "prepend"} import preserves first duplicates without repeated order scans',
+      () {
+        final counted = CountingOrderRepository(db);
+        repository = counted;
+        final items = <Map<String, Object>>[];
+        for (var index = 0; index < 900; index++) {
+          items.add(item('bulk-$index'));
+          if (index % 7 == 0) {
+            items.add({...item('bulk-$index'), 'name': 'duplicate'});
+          }
+        }
+        items.add(item('bulk-0', 18));
+        final (folder, _) = run(package(items), append: append);
+        final expected = [
+          for (var index = 0; index < 900; index++) ('bulk-$index', 17),
+          ('bulk-0', 18),
+        ];
+        final imported = repository.getFolderComics(folder);
+        expect(
+          imported.map((comic) => (comic.id, comic.type.value)),
+          append ? expected : expected.reversed,
+        );
+        expect(imported.every((comic) => comic.name == comic.id), isTrue);
+        final rows = db.select(
+          'SELECT display_order, translated_tags FROM "$folder" ORDER BY display_order;',
+        );
+        expect(rows.map((row) => row['display_order']), [
+          for (var index = 1; index <= expected.length; index++)
+            append ? index : index - expected.length - 1,
+        ]);
+        expect(
+          rows.every((row) => row['translated_tags'] == 'translated'),
+          isTrue,
+        );
+        expect(counted.orderScans, 0);
+      },
+    );
+  }
 }

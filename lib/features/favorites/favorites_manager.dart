@@ -312,12 +312,15 @@ class LocalFavoritesManager with ChangeNotifier {
     _notifyFollowUpdatesChanged();
   }
 
-  void _refreshIdentityCounts(Iterable<(String, int)> identities) {
+  Map<(String, int), int> _refreshIdentityCounts(
+    Iterable<(String, int)> identities,
+  ) {
     final requested = identities.toSet();
     final counts = _repository.referenceCounts(folderNames, requested);
     for (final identity in requested) {
       _identityIndex.setCount(identity, counts[identity] ?? 0);
     }
+    return counts;
   }
 
   static Future<Map<(String, int), int>> _initHashedIds(
@@ -661,12 +664,12 @@ class LocalFavoritesManager with ChangeNotifier {
         identities.add((id, type));
       }
     }
-    _refreshIdentityCounts(identities);
+    final references = _refreshIdentityCounts(identities);
     // A cover is shared across folders. Files cannot participate in SQLite
     // rollback, so release them only after commit and the final reference.
-    final folders = folderNames;
+    // Reuse the committed counts rather than querying every folder per comic.
     for (final (id, type) in identities) {
-      if (_repository.findFolders(folders, id, type).isNotEmpty) continue;
+      if ((references[(id, type)] ?? 0) > 0) continue;
       try {
         LocalFavoriteImageProvider.delete(id, type);
       } catch (error, stack) {

@@ -30,13 +30,19 @@ import 'package:venera_next/foundation/sqlite_transaction.dart';
       folder = '$name(${suffix++})';
     }
     repository.createFolder(folder);
+    final step = append ? 1 : -1;
+    var order = step;
     for (var index = 0; index < comics.length; index++) {
-      repository.addComic(
+      final added = repository.addComic(
         folder,
         comics[index],
         translatedTags: translations[index],
         append: append,
+        order: order,
       );
+      // This folder starts empty; avoid rescanning it for each next position.
+      // Duplicate identities retain their first entry without consuming a slot.
+      if (added) order += step;
     }
     return (folder, comics);
   });
