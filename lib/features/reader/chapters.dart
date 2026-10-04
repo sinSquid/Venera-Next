@@ -9,6 +9,8 @@ import 'package:venera_next/foundation/context.dart';
 import 'package:venera_next/foundation/translations.dart';
 import 'package:venera_next/foundation/widget_utils.dart';
 
+const _chapterTileExtent = 48.0;
+
 class ReaderChaptersView extends StatefulWidget {
   const ReaderChaptersView(this.reader, {super.key});
 
@@ -23,24 +25,37 @@ class ReaderChaptersViewState extends State<ReaderChaptersView> {
 
   late final ScrollController _scrollController;
 
-  var downloaded = <String>[];
+  late final List<MapEntry<String, String>> _chapters;
+
+  var downloaded = <String>{};
 
   @override
   void initState() {
     super.initState();
+    _chapters = widget.reader.widget.chapters!.allChapters.entries.toList(
+      growable: false,
+    );
     int epIndex = widget.reader.chapter - 2;
     _scrollController = ScrollController(
-      initialScrollOffset: (epIndex * 48.0 + 52).clamp(0, double.infinity),
+      initialScrollOffset: (epIndex * _chapterTileExtent + 52).clamp(
+        0,
+        double.infinity,
+      ),
     );
     var local = LocalManager().find(widget.reader.cid, widget.reader.type);
     if (local != null) {
-      downloaded = local.downloadedChapters;
+      downloaded = local.downloadedChapters.toSet();
     }
   }
 
   @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    var chapters = widget.reader.widget.chapters!;
     var current = widget.reader.chapter - 1;
     return Scaffold(
       body: SmoothCustomScrollView(
@@ -67,24 +82,23 @@ class ReaderChaptersViewState extends State<ReaderChaptersView> {
               ),
             ],
           ),
-          SliverList(
+          SliverFixedExtentList(
+            itemExtent: _chapterTileExtent,
             delegate: SliverChildBuilderDelegate((context, index) {
               if (desc) {
-                index = chapters.length - 1 - index;
+                index = _chapters.length - 1 - index;
               }
-              var chapter = chapters.titles.elementAt(index);
+              final chapter = _chapters[index];
               return _ChapterListTile(
                 onTap: () {
                   widget.reader.toChapter(index + 1);
                   Navigator.of(context).pop();
                 },
-                title: chapter,
+                title: chapter.value,
                 isActive: current == index,
-                isDownloaded: downloaded.contains(
-                  chapters.ids.elementAt(index),
-                ),
+                isDownloaded: downloaded.contains(chapter.key),
               );
-            }, childCount: chapters.length),
+            }, childCount: _chapters.length),
           ),
         ],
       ),
@@ -112,34 +126,49 @@ class ReaderGroupedChaptersViewState extends State<ReaderGroupedChaptersView>
 
   late final String initialGroupName;
 
-  var downloaded = <String>[];
+  late final List<_ChapterGroup> _groups;
+
+  var downloaded = <String>{};
 
   @override
   void initState() {
     super.initState();
+    _groups = [];
+    var firstChapter = 1;
+    for (final name in chapters.groups) {
+      final entries = chapters.getGroup(name).entries.toList(growable: false);
+      _groups.add(_ChapterGroup(name, entries, firstChapter));
+      firstChapter += entries.length;
+    }
     int index = 0;
     int epIndex = widget.reader.chapter - 1;
-    while (epIndex >= 0) {
-      epIndex -= chapters.getGroupByIndex(index).length;
+    while (epIndex >= _groups[index].chapters.length) {
+      epIndex -= _groups[index].chapters.length;
       index++;
     }
     tabController = TabController(
-      length: chapters.groups.length,
+      length: _groups.length,
       vsync: this,
-      initialIndex: index - 1,
+      initialIndex: index,
     );
-    initialGroupName = chapters.groups.elementAt(index - 1);
-    var epIndexAtGroup = widget.reader.chapter - 1;
-    for (var i = 0; i < index - 1; i++) {
-      epIndexAtGroup -= chapters.getGroupByIndex(i).length;
-    }
+    initialGroupName = _groups[index].name;
     _scrollController = ScrollController(
-      initialScrollOffset: (epIndexAtGroup * 48.0).clamp(0, double.infinity),
+      initialScrollOffset: (epIndex * _chapterTileExtent).clamp(
+        0,
+        double.infinity,
+      ),
     );
     var local = LocalManager().find(widget.reader.cid, widget.reader.type);
     if (local != null) {
-      downloaded = local.downloadedChapters;
+      downloaded = local.downloadedChapters.toSet();
     }
+  }
+
+  @override
+  void dispose() {
+    tabController.dispose();
+    _scrollController.dispose();
+    super.dispose();
   }
 
   @override
@@ -149,48 +178,49 @@ class ReaderGroupedChaptersViewState extends State<ReaderGroupedChaptersView>
         Appbar(title: Text("Chapters".tl)),
         AppTabBar(
           controller: tabController,
-          tabs: chapters.groups.map((e) => Tab(text: e)).toList(),
+          tabs: _groups.map((group) => Tab(text: group.name)).toList(),
         ),
         Expanded(
           child: TabViewBody(
             controller: tabController,
-            children: chapters.groups.map(buildGroup).toList(),
+            children: _groups.map(_buildGroup).toList(),
           ),
         ),
       ],
     );
   }
 
-  Widget buildGroup(String groupName) {
-    var group = chapters.getGroup(groupName);
+  Widget _buildGroup(_ChapterGroup group) {
     return SmoothCustomScrollView(
-      controller: initialGroupName == groupName ? _scrollController : null,
+      controller: initialGroupName == group.name ? _scrollController : null,
       slivers: [
-        SliverList(
+        SliverFixedExtentList(
+          itemExtent: _chapterTileExtent,
           delegate: SliverChildBuilderDelegate((context, index) {
-            var name = group.values.elementAt(index);
-            var i = 0;
-            for (var g in chapters.groups) {
-              if (g == groupName) {
-                break;
-              }
-              i += chapters.getGroup(g).length;
-            }
-            i += index + 1;
+            final chapter = group.chapters[index];
+            final i = group.firstChapter + index;
             return _ChapterListTile(
               onTap: () {
                 widget.reader.toChapter(i);
                 context.pop();
               },
-              title: name,
+              title: chapter.value,
               isActive: widget.reader.chapter == i,
-              isDownloaded: downloaded.contains(group.keys.elementAt(index)),
+              isDownloaded: downloaded.contains(chapter.key),
             );
-          }, childCount: group.length),
+          }, childCount: group.chapters.length),
         ),
       ],
     );
   }
+}
+
+class _ChapterGroup {
+  const _ChapterGroup(this.name, this.chapters, this.firstChapter);
+
+  final String name;
+  final List<MapEntry<String, String>> chapters;
+  final int firstChapter;
 }
 
 class _ChapterListTile extends StatelessWidget {
@@ -214,7 +244,7 @@ class _ChapterListTile extends StatelessWidget {
     return ClickInkWell(
       onTap: onTap,
       child: Container(
-        height: 48,
+        height: _chapterTileExtent,
         padding: const EdgeInsets.symmetric(horizontal: 16),
         decoration: BoxDecoration(
           border: Border(
